@@ -1,0 +1,327 @@
+{
+  "generatedAt": "2026-02-12T08:53:11.341Z",
+  "source": "Derived from species-top200.json",
+  "targetCount": 40,
+  "species": [
+    {
+      "observations": 7858,
+      "taxonId": 46020,
+      "scientificName": "Sciurus niger",
+      "commonName": "Eastern Fox Squirrel",
+      "iconicTaxon": "Mammalia",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Fox_squirrel"
+    },
+    {
+      "observations": 4779,
+      "taxonId": 42223,
+      "scientificName": "Odocoileus virginianus",
+      "commonName": "White-tailed Deer",
+      "iconicTaxon": "Mammalia",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/White-tailed_deer"
+    },
+    {
+      "observations": 2565,
+      "taxonId": 41663,
+      "scientificName": "Procyon lotor",
+      "commonName": "Common Raccoon",
+      "iconicTaxon": "Mammalia",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Raccoon"
+    },
+    {
+      "observations": 1871,
+      "taxonId": 42652,
+      "scientificName": "Didelphis virginiana",
+      "commonName": "Virginia Opossum",
+      "iconicTaxon": "Mammalia",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Virginia_opossum"
+    },
+    {
+      "observations": 1682,
+      "taxonId": 43111,
+      "scientificName": "Sylvilagus floridanus",
+      "commonName": "Eastern Cottontail",
+      "iconicTaxon": "Mammalia",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Eastern_cottontail"
+    },
+    {
+      "observations": 6363,
+      "taxonId": 9083,
+      "scientificName": "Cardinalis cardinalis",
+      "commonName": "Northern Cardinal",
+      "iconicTaxon": "Aves",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Northern_cardinal"
+    },
+    {
+      "observations": 5792,
+      "taxonId": 9607,
+      "scientificName": "Quiscalus mexicanus",
+      "commonName": "Great-tailed Grackle",
+      "iconicTaxon": "Aves",
+      "wikipediaUrl": "https://en.wikipedia.org/wiki/Great-tailed_grackle"
+    },
+    {
+      "observations": 4454,
+      "taxonId": 14886,
+      "scientificName": "Mimus polyglottos",
+      "commonName": "Northern Mockingbird",
+      "iconicTaxon": "Aves",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Northern_mockingbird"
+    },
+    {
+      "observations": 3460,
+      "taxonId": 3460,
+      "scientificName": "Zenaida asiatica",
+      "commonName": "White-winged Dove",
+      "iconicTaxon": "Aves",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/White-winged_dove"
+    },
+    {
+      "observations": 3090,
+      "taxonId": 5206,
+      "scientificName": "Buteo lineatus",
+      "commonName": "Red-shouldered Hawk",
+      "iconicTaxon": "Aves",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Red-shouldered_hawk"
+    },
+    {
+      "observations": 7490,
+      "taxonId": 36202,
+      "scientificName": "Sceloporus olivaceus",
+      "commonName": "Texas Spiny Lizard",
+      "iconicTaxon": "Reptilia",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Texas_spiny_lizard"
+    },
+    {
+      "observations": 7062,
+      "taxonId": 36514,
+      "scientificName": "Anolis carolinensis",
+      "commonName": "Green Anole",
+      "iconicTaxon": "Reptilia",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Carolina_anole"
+    },
+    {
+      "observations": 4413,
+      "taxonId": 39782,
+      "scientificName": "Trachemys scripta",
+      "commonName": "Pond Slider",
+      "iconicTaxon": "Reptilia",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Pond_slider"
+    },
+    {
+      "observations": 3557,
+      "taxonId": 34435,
+      "scientificName": "Hemidactylus turcicus",
+      "commonName": "Mediterranean House Gecko",
+      "iconicTaxon": "Reptilia",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Mediterranean_house_gecko"
+    },
+    {
+      "observations": 2742,
+      "taxonId": 73669,
+      "scientificName": "Aspidoscelis gularis",
+      "commonName": "Common Spotted Whiptail",
+      "iconicTaxon": "Reptilia",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Texas_spotted_whiptail"
+    },
+    {
+      "observations": 5617,
+      "taxonId": 65849,
+      "scientificName": "Incilius nebulifer",
+      "commonName": "Gulf Coast Toad",
+      "iconicTaxon": "Amphibia",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Incilius_nebulifer"
+    },
+    {
+      "observations": 1208,
+      "taxonId": 70421,
+      "scientificName": "Acris blanchardi",
+      "commonName": "Blanchard's Cricket Frog",
+      "iconicTaxon": "Amphibia",
+      "wikipediaUrl": "https://en.wikipedia.org/wiki/Blanchard's_cricket_frog"
+    },
+    {
+      "observations": 930,
+      "taxonId": 27226,
+      "scientificName": "Plethodon albagula",
+      "commonName": "Western Slimy Salamander",
+      "iconicTaxon": "Amphibia",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Western_slimy_salamander"
+    },
+    {
+      "observations": 821,
+      "taxonId": 23969,
+      "scientificName": "Hyla cinerea",
+      "commonName": "Green Treefrog",
+      "iconicTaxon": "Amphibia",
+      "wikipediaUrl": "https://en.wikipedia.org/wiki/American_green_tree_frog"
+    },
+    {
+      "observations": 675,
+      "taxonId": 1364008,
+      "scientificName": "Lepomis aquilensis",
+      "commonName": "Plains Longear Sunfish",
+      "iconicTaxon": "Actinopterygii",
+      "wikipediaUrl": "https://en.wikipedia.org/wiki/Longear_sunfish"
+    },
+    {
+      "observations": 675,
+      "taxonId": 1439808,
+      "scientificName": "Micropterus nigricans",
+      "commonName": "Largemouth Bass",
+      "iconicTaxon": "Actinopterygii",
+      "wikipediaUrl": "https://en.wikipedia.org/wiki/Largemouth_bass"
+    },
+    {
+      "observations": 668,
+      "taxonId": 49591,
+      "scientificName": "Lepomis macrochirus",
+      "commonName": "Bluegill",
+      "iconicTaxon": "Actinopterygii",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Bluegill"
+    },
+    {
+      "observations": 5845,
+      "taxonId": 47219,
+      "scientificName": "Apis mellifera",
+      "commonName": "Western Honey Bee",
+      "iconicTaxon": "Insecta",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Western_honey_bee"
+    },
+    {
+      "observations": 5508,
+      "taxonId": 49150,
+      "scientificName": "Dione vanillae",
+      "commonName": "Gulf Fritillary",
+      "iconicTaxon": "Insecta",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Gulf_fritillary"
+    },
+    {
+      "observations": 5433,
+      "taxonId": 48662,
+      "scientificName": "Danaus plexippus",
+      "commonName": "Monarch",
+      "iconicTaxon": "Insecta",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Monarch_butterfly"
+    },
+    {
+      "observations": 5029,
+      "taxonId": 51743,
+      "scientificName": "Danaus gilippus",
+      "commonName": "Queen",
+      "iconicTaxon": "Insecta",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Queen_(butterfly)"
+    },
+    {
+      "observations": 3789,
+      "taxonId": 49133,
+      "scientificName": "Vanessa atalanta",
+      "commonName": "Red Admiral",
+      "iconicTaxon": "Insecta",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Vanessa_atalanta"
+    },
+    {
+      "observations": 4975,
+      "taxonId": 49564,
+      "scientificName": "Lupinus texensis",
+      "commonName": "Texas bluebonnet",
+      "iconicTaxon": "Plantae",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Lupinus_texensis"
+    },
+    {
+      "observations": 4844,
+      "taxonId": 79137,
+      "scientificName": "Solanum elaeagnifolium",
+      "commonName": "silverleaf nightshade",
+      "iconicTaxon": "Plantae",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Solanum_elaeagnifolium"
+    },
+    {
+      "observations": 4524,
+      "taxonId": 135927,
+      "scientificName": "Juniperus ashei",
+      "commonName": "Ashe juniper",
+      "iconicTaxon": "Plantae",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Juniperus_ashei"
+    },
+    {
+      "observations": 4488,
+      "taxonId": 77740,
+      "scientificName": "Ligustrum lucidum",
+      "commonName": "tree privet",
+      "iconicTaxon": "Plantae",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Ligustrum_lucidum"
+    },
+    {
+      "observations": 4393,
+      "taxonId": 273862,
+      "scientificName": "Berberis trifoliolata",
+      "commonName": "Agarita",
+      "iconicTaxon": "Plantae",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Mahonia_trifoliolata"
+    },
+    {
+      "observations": 4379,
+      "taxonId": 84405,
+      "scientificName": "Calyptocarpus vialis",
+      "commonName": "straggler daisy",
+      "iconicTaxon": "Plantae",
+      "wikipediaUrl": "https://en.wikipedia.org/wiki/Calyptocarpus_vialis"
+    },
+    {
+      "observations": 4216,
+      "taxonId": 48625,
+      "scientificName": "Oenothera speciosa",
+      "commonName": "Pinkladies",
+      "iconicTaxon": "Plantae",
+      "wikipediaUrl": "https://en.wikipedia.org/wiki/Oenothera_speciosa"
+    },
+    {
+      "observations": 4080,
+      "taxonId": 51768,
+      "scientificName": "Gaillardia pulchella",
+      "commonName": "firewheel",
+      "iconicTaxon": "Plantae",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Gaillardia_pulchella"
+    },
+    {
+      "observations": 3862,
+      "taxonId": 120942,
+      "scientificName": "Malvaviscus arboreus",
+      "commonName": "Turk's cap",
+      "iconicTaxon": "Plantae",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Malvaviscus_arboreus"
+    },
+    {
+      "observations": 3839,
+      "taxonId": 127010,
+      "scientificName": "Nandina domestica",
+      "commonName": "Heavenly bamboo",
+      "iconicTaxon": "Plantae",
+      "wikipediaUrl": "https://en.wikipedia.org/wiki/Nandina"
+    },
+    {
+      "observations": 3527,
+      "taxonId": 121612,
+      "scientificName": "Estigmene acrea",
+      "commonName": "Salt Marsh Moth",
+      "iconicTaxon": "Insecta",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Estigmene_acrea"
+    },
+    {
+      "observations": 3524,
+      "taxonId": 50931,
+      "scientificName": "Strymon melinus",
+      "commonName": "Gray Hairstreak",
+      "iconicTaxon": "Insecta",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Gray_hairstreak"
+    },
+    {
+      "observations": 3372,
+      "taxonId": 53720,
+      "scientificName": "Melia azedarach",
+      "commonName": "Chinaberry",
+      "iconicTaxon": "Plantae",
+      "wikipediaUrl": "http://en.wikipedia.org/wiki/Melia_azedarach"
+    }
+  ]
+}

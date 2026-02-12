@@ -1,0 +1,24 @@
+{
+  "generatedAt": "2026-02-12T08:53:11.341Z",
+  "source": "OpenStreetMap Nominatim",
+  "location": {
+    "displayName": "Austin, Travis County, Texas, United States",
+    "lat": 30.2711286,
+    "lon": -97.7436995,
+    "boundingBox": [
+      30.0985133,
+      30.5166255,
+      -97.9367663,
+      -97.5605288
+    ],
+    "osmType": "relation",
+    "osmId": 113314,
+    "geojsonType": "MultiPolygon"
+  },
+  "prototypeBounds": {
+    "south": 30.141128600000002,
+    "west": -97.9036995,
+    "north": 30.4011286,
+    "east": -97.58369950000001
+  }
+}

@@ -1,0 +1,126 @@
+{
+  "generatedAt": "2026-02-12T08:53:20.272Z",
+  "count": 12,
+  "queue": [
+    {
+      "monId": "austin-46020",
+      "taxonId": 46020,
+      "commonName": "Eastern Fox Squirrel",
+      "scientificName": "Sciurus niger",
+      "stylePrompt": "Top-down retro handheld pixel sprite, 32x32 frame grid, crisp outlines, readable silhouette, no text.",
+      "anatomyPrompt": "Species reference: Sciurus niger (Eastern Fox Squirrel). Keep proportions inspired by species but stylized as a friendly monster.",
+      "animationPrompt": "Generate animations: idle(4), walk(6), attack(6), sleep(2), faint(2), hurt(2), jump(3), run(6). Keep consistent palette and silhouette across frames.",
+      "outputSpec": "Output transparent PNG sprite sheet and JSON frame map grouped by animation. Frame size 32x32."
+    },
+    {
+      "monId": "austin-42223",
+      "taxonId": 42223,
+      "commonName": "White-tailed Deer",
+      "scientificName": "Odocoileus virginianus",
+      "stylePrompt": "Top-down retro handheld pixel sprite, 32x32 frame grid, crisp outlines, readable silhouette, no text.",
+      "anatomyPrompt": "Species reference: Odocoileus virginianus (White-tailed Deer). Keep proportions inspired by species but stylized as a friendly monster.",
+      "animationPrompt": "Generate animations: idle(4), walk(6), attack(6), sleep(2), faint(2), hurt(2), jump(3), run(6). Keep consistent palette and silhouette across frames.",
+      "outputSpec": "Output transparent PNG sprite sheet and JSON frame map grouped by animation. Frame size 32x32."
+    },
+    {
+      "monId": "austin-41663",
+      "taxonId": 41663,
+      "commonName": "Common Raccoon",
+      "scientificName": "Procyon lotor",
+      "stylePrompt": "Top-down retro handheld pixel sprite, 32x32 frame grid, crisp outlines, readable silhouette, no text.",
+      "anatomyPrompt": "Species reference: Procyon lotor (Common Raccoon). Keep proportions inspired by species but stylized as a friendly monster.",
+      "animationPrompt": "Generate animations: idle(4), walk(6), attack(6), sleep(2), faint(2), hurt(2), jump(3), run(6). Keep consistent palette and silhouette across frames.",
+      "outputSpec": "Output transparent PNG sprite sheet and JSON frame map grouped by animation. Frame size 32x32."
+    },
+    {
+      "monId": "austin-42652",
+      "taxonId": 42652,
+      "commonName": "Virginia Opossum",
+      "scientificName": "Didelphis virginiana",
+      "stylePrompt": "Top-down retro handheld pixel sprite, 32x32 frame grid, crisp outlines, readable silhouette, no text.",
+      "anatomyPrompt": "Species reference: Didelphis virginiana (Virginia Opossum). Keep proportions inspired by species but stylized as a friendly monster.",
+      "animationPrompt": "Generate animations: idle(4), walk(6), attack(6), sleep(2), faint(2), hurt(2), jump(3), run(6). Keep consistent palette and silhouette across frames.",
+      "outputSpec": "Output transparent PNG sprite sheet and JSON frame map grouped by animation. Frame size 32x32."
+    },
+    {
+      "monId": "austin-43111",
+      "taxonId": 43111,
+      "commonName": "Eastern Cottontail",
+      "scientificName": "Sylvilagus floridanus",
+      "stylePrompt": "Top-down retro handheld pixel sprite, 32x32 frame grid, crisp outlines, readable silhouette, no text.",
+      "anatomyPrompt": "Species reference: Sylvilagus floridanus (Eastern Cottontail). Keep proportions inspired by species but stylized as a friendly monster.",
+      "animationPrompt": "Generate animations: idle(4), walk(6), attack(6), sleep(2), faint(2), hurt(2), jump(3), run(6). Keep consistent palette and silhouette across frames.",
+      "outputSpec": "Output transparent PNG sprite sheet and JSON frame map grouped by animation. Frame size 32x32."
+    },
+    {
+      "monId": "austin-9083",
+      "taxonId": 9083,
+      "commonName": "Northern Cardinal",
+      "scientificName": "Cardinalis cardinalis",
+      "stylePrompt": "Top-down retro handheld pixel sprite, 32x32 frame grid, crisp outlines, readable silhouette, no text.",
+      "anatomyPrompt": "Species reference: Cardinalis cardinalis (Northern Cardinal). Keep proportions inspired by species but stylized as a friendly monster.",
+      "animationPrompt": "Generate animations: idle(4), walk(6), attack(6), sleep(2), faint(2), hurt(2), jump(3), run(6). Keep consistent palette and silhouette across frames.",
+      "outputSpec": "Output transparent PNG sprite sheet and JSON frame map grouped by animation. Frame size 32x32."
+    },
+    {
+      "monId": "austin-9607",
+      "taxonId": 9607,
+      "commonName": "Great-tailed Grackle",
+      "scientificName": "Quiscalus mexicanus",
+      "stylePrompt": "Top-down retro handheld pixel sprite, 32x32 frame grid, crisp outlines, readable silhouette, no text.",
+      "anatomyPrompt": "Species reference: Quiscalus mexicanus (Great-tailed Grackle). Keep proportions inspired by species but stylized as a friendly monster.",
+      "animationPrompt": "Generate animations: idle(4), walk(6), attack(6), sleep(2), faint(2), hurt(2), jump(3), run(6). Keep consistent palette and silhouette across frames.",
+      "outputSpec": "Output transparent PNG sprite sheet and JSON frame map grouped by animation. Frame size 32x32."
+    },
+    {
+      "monId": "austin-14886",
+      "taxonId": 14886,
+      "commonName": "Northern Mockingbird",
+      "scientificName": "Mimus polyglottos",
+      "stylePrompt": "Top-down retro handheld pixel sprite, 32x32 frame grid, crisp outlines, readable silhouette, no text.",
+      "anatomyPrompt": "Species reference: Mimus polyglottos (Northern Mockingbird). Keep proportions inspired by species but stylized as a friendly monster.",
+      "animationPrompt": "Generate animations: idle(4), walk(6), attack(6), sleep(2), faint(2), hurt(2), jump(3), run(6). Keep consistent palette and silhouette across frames.",
+      "outputSpec": "Output transparent PNG sprite sheet and JSON frame map grouped by animation. Frame size 32x32."
+    },
+    {
+      "monId": "austin-3460",
+      "taxonId": 3460,
+      "commonName": "White-winged Dove",
+      "scientificName": "Zenaida asiatica",
+      "stylePrompt": "Top-down retro handheld pixel sprite, 32x32 frame grid, crisp outlines, readable silhouette, no text.",
+      "anatomyPrompt": "Species reference: Zenaida asiatica (White-winged Dove). Keep proportions inspired by species but stylized as a friendly monster.",
+      "animationPrompt": "Generate animations: idle(4), walk(6), attack(6), sleep(2), faint(2), hurt(2), jump(3), run(6). Keep consistent palette and silhouette across frames.",
+      "outputSpec": "Output transparent PNG sprite sheet and JSON frame map grouped by animation. Frame size 32x32."
+    },
+    {
+      "monId": "austin-5206",
+      "taxonId": 5206,
+      "commonName": "Red-shouldered Hawk",
+      "scientificName": "Buteo lineatus",
+      "stylePrompt": "Top-down retro handheld pixel sprite, 32x32 frame grid, crisp outlines, readable silhouette, no text.",
+      "anatomyPrompt": "Species reference: Buteo lineatus (Red-shouldered Hawk). Keep proportions inspired by species but stylized as a friendly monster.",
+      "animationPrompt": "Generate animations: idle(4), walk(6), attack(6), sleep(2), faint(2), hurt(2), jump(3), run(6). Keep consistent palette and silhouette across frames.",
+      "outputSpec": "Output transparent PNG sprite sheet and JSON frame map grouped by animation. Frame size 32x32."
+    },
+    {
+      "monId": "austin-36202",
+      "taxonId": 36202,
+      "commonName": "Texas Spiny Lizard",
+      "scientificName": "Sceloporus olivaceus",
+      "stylePrompt": "Top-down retro handheld pixel sprite, 32x32 frame grid, crisp outlines, readable silhouette, no text.",
+      "anatomyPrompt": "Species reference: Sceloporus olivaceus (Texas Spiny Lizard). Keep proportions inspired by species but stylized as a friendly monster.",
+      "animationPrompt": "Generate animations: idle(4), walk(6), attack(6), sleep(2), faint(2), hurt(2), jump(3), run(6). Keep consistent palette and silhouette across frames.",
+      "outputSpec": "Output transparent PNG sprite sheet and JSON frame map grouped by animation. Frame size 32x32."
+    },
+    {
+      "monId": "austin-36514",
+      "taxonId": 36514,
+      "commonName": "Green Anole",
+      "scientificName": "Anolis carolinensis",
+      "stylePrompt": "Top-down retro handheld pixel sprite, 32x32 frame grid, crisp outlines, readable silhouette, no text.",
+      "anatomyPrompt": "Species reference: Anolis carolinensis (Green Anole). Keep proportions inspired by species but stylized as a friendly monster.",
+      "animationPrompt": "Generate animations: idle(4), walk(6), attack(6), sleep(2), faint(2), hurt(2), jump(3), run(6). Keep consistent palette and silhouette across frames.",
+      "outputSpec": "Output transparent PNG sprite sheet and JSON frame map grouped by animation. Frame size 32x32."
+    }
+  ]
+}

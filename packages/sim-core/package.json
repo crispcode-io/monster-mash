@@ -1,0 +1,11 @@
+{
+  "name": "@monster-mash/sim-core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "High-performance deterministic simulation core in Rust (native + WASM targets).",
+  "scripts": {
+    "check:rust": "cargo check --manifest-path Cargo.toml",
+    "test:rust": "cargo test --manifest-path Cargo.toml",
+    "build:wasm": "wasm-pack build --target web --out-dir pkg --release"
+  }
+}

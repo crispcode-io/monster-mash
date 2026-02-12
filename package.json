@@ -1,0 +1,14 @@
+{
+  "name": "monster-mash",
+  "private": true,
+  "packageManager": "pnpm@9.15.9",
+  "scripts": {
+    "dev": "pnpm --filter web dev",
+    "build": "pnpm --filter web build",
+    "lint": "pnpm --filter web lint",
+    "typecheck": "pnpm --filter web typecheck",
+    "data:austin": "node scripts/bootstrap-austin-data.mjs",
+    "atlas:austin": "node scripts/build-austin-atlas-plan.mjs",
+    "data:sync:web": "node scripts/sync-austin-data-to-web.mjs"
+  }
+}

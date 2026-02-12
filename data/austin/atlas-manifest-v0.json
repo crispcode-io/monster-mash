@@ -1,0 +1,151 @@
+{
+  "version": 1,
+  "atlasId": "austin-v0",
+  "generatedAt": "2026-02-12T08:53:20.272Z",
+  "frameSize": {
+    "width": 32,
+    "height": 32
+  },
+  "requiredAnimations": [
+    "idle",
+    "walk",
+    "attack",
+    "sleep",
+    "faint",
+    "hurt",
+    "jump",
+    "run"
+  ],
+  "animationFrameTargets": {
+    "idle": 4,
+    "walk": 6,
+    "attack": 6,
+    "sleep": 2,
+    "faint": 2,
+    "hurt": 2,
+    "jump": 3,
+    "run": 6
+  },
+  "mons": [
+    {
+      "monId": "austin-46020",
+      "taxonId": 46020,
+      "commonName": "Eastern Fox Squirrel",
+      "scientificName": "Sciurus niger",
+      "iconicTaxon": "Mammalia",
+      "sourceObservations": 7858,
+      "spriteSheetPath": "/atlas/austin-v0/mons/46020.png",
+      "metadataPath": "/atlas/austin-v0/mons/46020.json"
+    },
+    {
+      "monId": "austin-42223",
+      "taxonId": 42223,
+      "commonName": "White-tailed Deer",
+      "scientificName": "Odocoileus virginianus",
+      "iconicTaxon": "Mammalia",
+      "sourceObservations": 4779,
+      "spriteSheetPath": "/atlas/austin-v0/mons/42223.png",
+      "metadataPath": "/atlas/austin-v0/mons/42223.json"
+    },
+    {
+      "monId": "austin-41663",
+      "taxonId": 41663,
+      "commonName": "Common Raccoon",
+      "scientificName": "Procyon lotor",
+      "iconicTaxon": "Mammalia",
+      "sourceObservations": 2565,
+      "spriteSheetPath": "/atlas/austin-v0/mons/41663.png",
+      "metadataPath": "/atlas/austin-v0/mons/41663.json"
+    },
+    {
+      "monId": "austin-42652",
+      "taxonId": 42652,
+      "commonName": "Virginia Opossum",
+      "scientificName": "Didelphis virginiana",
+      "iconicTaxon": "Mammalia",
+      "sourceObservations": 1871,
+      "spriteSheetPath": "/atlas/austin-v0/mons/42652.png",
+      "metadataPath": "/atlas/austin-v0/mons/42652.json"
+    },
+    {
+      "monId": "austin-43111",
+      "taxonId": 43111,
+      "commonName": "Eastern Cottontail",
+      "scientificName": "Sylvilagus floridanus",
+      "iconicTaxon": "Mammalia",
+      "sourceObservations": 1682,
+      "spriteSheetPath": "/atlas/austin-v0/mons/43111.png",
+      "metadataPath": "/atlas/austin-v0/mons/43111.json"
+    },
+    {
+      "monId": "austin-9083",
+      "taxonId": 9083,
+      "commonName": "Northern Cardinal",
+      "scientificName": "Cardinalis cardinalis",
+      "iconicTaxon": "Aves",
+      "sourceObservations": 6363,
+      "spriteSheetPath": "/atlas/austin-v0/mons/9083.png",
+      "metadataPath": "/atlas/austin-v0/mons/9083.json"
+    },
+    {
+      "monId": "austin-9607",
+      "taxonId": 9607,
+      "commonName": "Great-tailed Grackle",
+      "scientificName": "Quiscalus mexicanus",
+      "iconicTaxon": "Aves",
+      "sourceObservations": 5792,
+      "spriteSheetPath": "/atlas/austin-v0/mons/9607.png",
+      "metadataPath": "/atlas/austin-v0/mons/9607.json"
+    },
+    {
+      "monId": "austin-14886",
+      "taxonId": 14886,
+      "commonName": "Northern Mockingbird",
+      "scientificName": "Mimus polyglottos",
+      "iconicTaxon": "Aves",
+      "sourceObservations": 4454,
+      "spriteSheetPath": "/atlas/austin-v0/mons/14886.png",
+      "metadataPath": "/atlas/austin-v0/mons/14886.json"
+    },
+    {
+      "monId": "austin-3460",
+      "taxonId": 3460,
+      "commonName": "White-winged Dove",
+      "scientificName": "Zenaida asiatica",
+      "iconicTaxon": "Aves",
+      "sourceObservations": 3460,
+      "spriteSheetPath": "/atlas/austin-v0/mons/3460.png",
+      "metadataPath": "/atlas/austin-v0/mons/3460.json"
+    },
+    {
+      "monId": "austin-5206",
+      "taxonId": 5206,
+      "commonName": "Red-shouldered Hawk",
+      "scientificName": "Buteo lineatus",
+      "iconicTaxon": "Aves",
+      "sourceObservations": 3090,
+      "spriteSheetPath": "/atlas/austin-v0/mons/5206.png",
+      "metadataPath": "/atlas/austin-v0/mons/5206.json"
+    },
+    {
+      "monId": "austin-36202",
+      "taxonId": 36202,
+      "commonName": "Texas Spiny Lizard",
+      "scientificName": "Sceloporus olivaceus",
+      "iconicTaxon": "Reptilia",
+      "sourceObservations": 7490,
+      "spriteSheetPath": "/atlas/austin-v0/mons/36202.png",
+      "metadataPath": "/atlas/austin-v0/mons/36202.json"
+    },
+    {
+      "monId": "austin-36514",
+      "taxonId": 36514,
+      "commonName": "Green Anole",
+      "scientificName": "Anolis carolinensis",
+      "iconicTaxon": "Reptilia",
+      "sourceObservations": 7062,
+      "spriteSheetPath": "/atlas/austin-v0/mons/36514.png",
+      "metadataPath": "/atlas/austin-v0/mons/36514.json"
+    }
+  ]
+}
