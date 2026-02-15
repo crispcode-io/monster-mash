@@ -1,18 +1,60 @@
-# dependencies
-node_modules
+# -----------------------------------------------------------------------------
+# Dependencies / package managers
+# -----------------------------------------------------------------------------
+node_modules/
+**/node_modules/
+.pnpm-store/
 
-# local build output
-.next
-dist
-coverage
-target
+# -----------------------------------------------------------------------------
+# Build outputs / caches
+# -----------------------------------------------------------------------------
+.next/
+**/.next/
+out/
+dist/
+build/
+coverage/
+.turbo/
+.cache/
 
-# environment
+# TypeScript / tooling caches
+*.tsbuildinfo
+next-env.d.ts
+
+# -----------------------------------------------------------------------------
+# Vercel
+# -----------------------------------------------------------------------------
+.vercel/
+
+# -----------------------------------------------------------------------------
+# Logs
+# -----------------------------------------------------------------------------
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# -----------------------------------------------------------------------------
+# Environment files (keep templates)
+# -----------------------------------------------------------------------------
 .env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
+.env.*
+!.env.example
+!.env*.example
 
-# misc
+# -----------------------------------------------------------------------------
+# Rust
+# -----------------------------------------------------------------------------
+target/
+**/target/
+# sim-core is a library crate; lockfile is generated and should not be committed
+packages/sim-core/Cargo.lock
+
+# -----------------------------------------------------------------------------
+# OS / editor noise
+# -----------------------------------------------------------------------------
 .DS_Store
+Thumbs.db
+.idea/
+.vscode/
