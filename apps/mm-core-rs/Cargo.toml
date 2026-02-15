@@ -1,0 +1,14 @@
+[package]
+name = "mm_core_rs"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Monster Mash low-level core for native and wasm targets."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"

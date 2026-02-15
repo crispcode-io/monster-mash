@@ -27,8 +27,12 @@ export interface ChunkData {
   entities: ChunkEntity[];
 }
 
-export function generateChunkData(chunkX: number, chunkZ: number): ChunkData {
-  const rng = mulberry32(hashChunkSeed(chunkX, chunkZ, WORLD_CONFIG.worldSeed));
+export function generateChunkData(
+  chunkX: number,
+  chunkZ: number,
+  worldSeed = WORLD_CONFIG.worldSeed,
+): ChunkData {
+  const rng = mulberry32(hashChunkSeed(chunkX, chunkZ, worldSeed));
   const biomeTone = rng();
   const tileSize = WORLD_CONFIG.chunkSize / CHUNK_GRID_CELLS;
   const terrainTiles: TerrainTile[] = [];
