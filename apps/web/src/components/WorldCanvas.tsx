@@ -14,19 +14,46 @@ import {
 } from "@/lib/assets";
 import { CameraMode, PlayerProfile, WORLD_CONFIG, worldToLatLon } from "@/lib/game-contracts";
 import { WorldEventType, getWorldOrchestratorClient } from "@/lib/orchestrator";
-import { RuntimeBlockDelta, WorldRuntimeClient, createRuntimeClient } from "@/lib/runtime";
-import { MmCoreRuntimeMode, getChunkMeshStatsFromOccupancy, initializeMmCoreRuntime } from "@/lib/wasm";
+import {
+  createMeshTimingTracker,
+  getChunkMeshTimingAverages,
+  recordMeshTiming,
+} from "@/lib/perf/mesh-timing";
+import {
+  DEFAULT_RUNTIME_CRAFT_RECIPES,
+  DEFAULT_RUNTIME_HOTBAR_SLOT_IDS,
+  DEFAULT_RUNTIME_RESOURCE_IDS,
+  DEFAULT_STASH_TRANSFER_AMOUNTS,
+  RuntimeBlockDelta,
+  RuntimeSpawnHint,
+  WORLD_SHARED_CONTAINER_ID,
+  WorldRuntimeClient,
+  clampCraftRecipeIndex,
+  clampRuntimeResourceIndex,
+  clampTransferAmountIndex,
+  cycleRuntimeResourceIndex,
+  cycleTransferAmountIndex,
+  createRuntimeClient,
+  formatRuntimeResourceLabel,
+  getPlayerPrivateContainerId,
+  resolveRequestedTransferAmount,
+  resolveRuntimeResourceId,
+  resolveCraftRecipeByIndex,
+  resolveCraftRecipeIndexForKey,
+  resolveTransferModifier,
+  resolveTransferAmount,
+} from "@/lib/runtime";
+import { MmCoreRuntimeMode, initializeMmCoreRuntime } from "@/lib/wasm";
+import { MmCoreMeshWorkerClient } from "@/lib/wasm/mm-core-mesh-worker-client";
 import {
   buildChunkOccupancyBuffer,
   VoxelBlockPosition,
   VoxelChunkData,
-  blockTypeColor,
   createVoxelChunkData,
   hasVoxelBlock,
   isValidPosition,
-  listVoxelBlocks,
-  localVoxelToChunkSpace,
   removeVoxelBlock,
+  resolveVoxelSurfaceHit,
   setVoxelBlock,
 } from "@/lib/voxel";
 import {
@@ -68,11 +95,51 @@ interface RuntimeHudState {
   connected: boolean;
 }
 
+interface WorldFlagHudState {
+  flags: Record<string, string>;
+  tick: number;
+}
+
+interface DirectiveHudState {
+  storyBeats: string[];
+  spawnHints: RuntimeSpawnHint[];
+  tick: number;
+}
+
+interface StoryBeatBannerState {
+  beat: string;
+  tick: number;
+  expiresAt: number;
+}
+
+interface DirectiveHistoryEntry {
+  id: string;
+  tick: number;
+  text: string;
+}
+
+interface HudToast {
+  id: string;
+  message: string;
+  tone: "info" | "success" | "error";
+  expiresAt: number;
+}
+
 interface MeshHudState {
-  coreMode: MmCoreRuntimeMode;
+  coreMode: MmCoreRuntimeMode | "uninitialized" | "error";
   quads: number;
   vertices: number;
   indices: number;
+  extractMs: number;
+  uploadMs: number;
+  extractAvgMs: number;
+  uploadAvgMs: number;
+  extractP95Ms: number;
+  uploadP95Ms: number;
+  activeChunkExtractAvgMs: number;
+  activeChunkUploadAvgMs: number;
+  trackedChunks: number;
+  workerError: string | null;
 }
 
 type HotbarActionKind = "melee" | "spell" | "item";
@@ -93,7 +160,19 @@ interface CombatHudState {
   selectedCooldownMs: number;
   lastAction: string;
   lastTarget: string;
+  targetResolution: string;
   status: string;
+}
+
+interface InventoryHudState {
+  resources: Record<string, number>;
+  tick: number;
+}
+
+interface ContainerHudState {
+  resources: Record<string, number>;
+  tick: number;
+  containerId: string;
 }
 
 interface SpriteTextureSet {
@@ -114,8 +193,8 @@ interface LoadedChunkRecord {
   chunkZ: number;
   group: THREE.Group;
   voxelChunk: VoxelChunkData;
-  voxelMesh: THREE.InstancedMesh | null;
-  voxelInstances: VoxelBlockPosition[];
+  voxelRenderMesh: THREE.Mesh | null;
+  meshRequestVersion: number;
   overlayGroup: THREE.Group;
   overlayState: ManifestOverlayState;
   intentsSubmitted: boolean;
@@ -145,11 +224,32 @@ const initialRuntimeHud: RuntimeHudState = {
   connected: false,
 };
 
+const initialWorldFlagHud: WorldFlagHudState = {
+  flags: {},
+  tick: 0,
+};
+
+const initialDirectiveHud: DirectiveHudState = {
+  storyBeats: [],
+  spawnHints: [],
+  tick: 0,
+};
+
 const initialMeshHud: MeshHudState = {
-  coreMode: "fallback-js",
+  coreMode: "uninitialized",
   quads: 0,
   vertices: 0,
   indices: 0,
+  extractMs: 0,
+  uploadMs: 0,
+  extractAvgMs: 0,
+  uploadAvgMs: 0,
+  extractP95Ms: 0,
+  uploadP95Ms: 0,
+  activeChunkExtractAvgMs: 0,
+  activeChunkUploadAvgMs: 0,
+  trackedChunks: 0,
+  workerError: null,
 };
 
 const HOTBAR_SLOTS: HotbarSlot[] = [
@@ -200,12 +300,12 @@ const HOTBAR_SLOTS: HotbarSlot[] = [
   },
 ];
 
-const HOTBAR_KEY_TO_INDEX = new Map(HOTBAR_SLOTS.map((slot, index) => [slot.keybind, index]));
 const HOTBAR_UI_SLOT_COUNT = 9;
-const HOTBAR_UI_SLOTS: Array<HotbarSlot | null> = Array.from(
-  { length: HOTBAR_UI_SLOT_COUNT },
-  (_, index) => HOTBAR_SLOTS[index] ?? null,
+const HOTBAR_KEY_TO_INDEX = new Map(
+  Array.from({ length: HOTBAR_SLOTS.length }, (_, index) => [String(index + 1), index]),
 );
+const HOTBAR_SLOT_BY_ID = new Map(HOTBAR_SLOTS.map((slot) => [slot.id, slot]));
+const CRAFT_RECIPE_BY_ID = new Map(DEFAULT_RUNTIME_CRAFT_RECIPES.map((recipe) => [recipe.id, recipe]));
 const MAX_HEARTS = 10;
 const CURRENT_HEARTS = 10;
 
@@ -215,8 +315,39 @@ const initialCombatHud: CombatHudState = {
   selectedCooldownMs: 0,
   lastAction: "none",
   lastTarget: "none",
-  status: "Select a slot (1-5), then click to attack or cast.",
+  targetResolution: "none",
+  status: "Select slot (1-5), recipe (6-9), press R to craft, then click to attack/cast.",
 };
+
+const initialInventoryHud: InventoryHudState = {
+  resources: Object.fromEntries(DEFAULT_RUNTIME_RESOURCE_IDS.map((resourceId) => [resourceId, 0])),
+  tick: 0,
+};
+
+const initialContainerHud: ContainerHudState = {
+  resources: Object.fromEntries(DEFAULT_RUNTIME_RESOURCE_IDS.map((resourceId) => [resourceId, 0])),
+  tick: 0,
+  containerId: WORLD_SHARED_CONTAINER_ID,
+};
+
+function clampHotbarIndex(index: number, slotCount: number): number {
+  if (slotCount <= 0) {
+    return 0;
+  }
+  return Math.max(0, Math.min(index, slotCount - 1));
+}
+
+function resolveHotbarSlots(slotIds: string[]): HotbarSlot[] {
+  const fallbackSlot = HOTBAR_SLOTS[0];
+  const resolved = slotIds
+    .map((slotId, index) => HOTBAR_SLOT_BY_ID.get(slotId) ?? HOTBAR_SLOTS[index] ?? fallbackSlot)
+    .filter((slot): slot is HotbarSlot => slot !== undefined);
+
+  if (resolved.length > 0) {
+    return resolved;
+  }
+  return fallbackSlot ? [fallbackSlot] : [];
+}
 
 export function WorldCanvas({ profile }: WorldCanvasProps) {
   const mountRef = useRef<HTMLDivElement | null>(null);
@@ -224,30 +355,162 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
   const [atlasSummary, setAtlasSummary] = useState<AtlasManifestSummary | null>(null);
   const [orchestratorHud, setOrchestratorHud] = useState<OrchestratorHudState>(initialOrchestratorHud);
   const [runtimeHud, setRuntimeHud] = useState<RuntimeHudState>(initialRuntimeHud);
+  const [worldFlagHud, setWorldFlagHud] = useState<WorldFlagHudState>(initialWorldFlagHud);
+  const [directiveHud, setDirectiveHud] = useState<DirectiveHudState>(initialDirectiveHud);
+  const [directiveHistory, setDirectiveHistory] = useState<DirectiveHistoryEntry[]>([]);
+  const [storyBeatBanner, setStoryBeatBanner] = useState<StoryBeatBannerState | null>(null);
+  const [hudToasts, setHudToasts] = useState<HudToast[]>([]);
   const [meshHud, setMeshHud] = useState<MeshHudState>(initialMeshHud);
+  const [showDiagnostics, setShowDiagnostics] = useState(true);
+  const [meshDetailMode, setMeshDetailMode] = useState<"basic" | "detailed">("detailed");
+  const [showMinimapDebug, setShowMinimapDebug] = useState(true);
+  const [mmCoreReady, setMmCoreReady] = useState(false);
+  const [mmCoreError, setMmCoreError] = useState<string | null>(null);
+  const [hotbarSlotIds, setHotbarSlotIds] = useState<string[]>(() => [...DEFAULT_RUNTIME_HOTBAR_SLOT_IDS]);
+  const hotbarSlots = useMemo(() => resolveHotbarSlots(hotbarSlotIds), [hotbarSlotIds]);
+  const hotbarUiSlots = useMemo(
+    () => Array.from({ length: HOTBAR_UI_SLOT_COUNT }, (_, index) => hotbarSlots[index] ?? null),
+    [hotbarSlots],
+  );
   const [selectedHotbarIndex, setSelectedHotbarIndex] = useState(0);
+  const [selectedCraftRecipeIndex, setSelectedCraftRecipeIndex] = useState(0);
+  const [selectedStashResourceIndex, setSelectedStashResourceIndex] = useState(0);
+  const [selectedTransferAmountIndex, setSelectedTransferAmountIndex] = useState(0);
+  const selectedCraftRecipe = useMemo(
+    () => resolveCraftRecipeByIndex(selectedCraftRecipeIndex),
+    [selectedCraftRecipeIndex],
+  );
+  const selectedStashResourceId = useMemo(
+    () => resolveRuntimeResourceId(selectedStashResourceIndex),
+    [selectedStashResourceIndex],
+  );
+  const selectedTransferAmount = useMemo(
+    () => resolveTransferAmount(selectedTransferAmountIndex),
+    [selectedTransferAmountIndex],
+  );
   const [combatHud, setCombatHud] = useState<CombatHudState>(initialCombatHud);
+  const [inventoryHud, setInventoryHud] = useState<InventoryHudState>(initialInventoryHud);
+  const [containerHud, setContainerHud] = useState<ContainerHudState>(initialContainerHud);
+  const [privateContainerHud, setPrivateContainerHud] = useState<ContainerHudState>({
+    resources: Object.fromEntries(DEFAULT_RUNTIME_RESOURCE_IDS.map((resourceId) => [resourceId, 0])),
+    tick: 0,
+    containerId: "",
+  });
   const [cameraMode, setCameraMode] = useState<CameraMode>(() => profile.preferredCamera);
   const cameraModeRef = useRef<CameraMode>(profile.preferredCamera);
   const selectedHotbarRef = useRef(0);
+  const selectedCraftRecipeIndexRef = useRef(0);
+  const selectedStashResourceIndexRef = useRef(0);
+  const selectedTransferAmountIndexRef = useRef(0);
+  const showDiagnosticsRef = useRef(true);
+  const meshDetailModeRef = useRef<"basic" | "detailed">("detailed");
+  const showMinimapDebugRef = useRef(true);
+  const hotbarSlotsRef = useRef<HotbarSlot[]>(hotbarSlots);
+  const inventoryResourcesRef = useRef<Record<string, number>>({ ...initialInventoryHud.resources });
+  const sharedContainerResourcesRef = useRef<Record<string, number>>({ ...initialContainerHud.resources });
+  const privateContainerResourcesRef = useRef<Record<string, number>>({
+    ...initialContainerHud.resources,
+  });
+  const runtimeClientRef = useRef<WorldRuntimeClient | null>(null);
+  const lastStoryBeatRef = useRef<string>("");
+  const lastSpawnHintSignatureRef = useRef<string>("");
   const assetClient = useMemo(() => getAssetServiceClient(), []);
   const orchestratorClient = useMemo(() => getWorldOrchestratorClient(), []);
   const worldSeed = profile.world.seed;
   const playerLabel = useMemo(() => profile.name, [profile.name]);
+  const privateContainerId = useMemo(() => getPlayerPrivateContainerId(profile.id), [profile.id]);
+  const activeHudToasts = useMemo(
+    () => hudToasts.filter((toast) => performance.now() < toast.expiresAt),
+    [hudToasts],
+  );
+
+  function handleHotbarSelect(index: number): void {
+    const nextIndex = clampHotbarIndex(index, hotbarSlotsRef.current.length);
+    setSelectedHotbarIndex(nextIndex);
+    runtimeClientRef.current?.selectHotbarSlot(profile.id, nextIndex);
+  }
+
+  function handleCraftRecipeSelect(index: number): void {
+    setSelectedCraftRecipeIndex(clampCraftRecipeIndex(index));
+  }
+
+  function handleStashResourceSelect(index: number): void {
+    setSelectedStashResourceIndex(clampRuntimeResourceIndex(index));
+  }
+
+  function handleTransferAmountSelect(index: number): void {
+    setSelectedTransferAmountIndex(clampTransferAmountIndex(index));
+  }
+
+  function pushHudToast(message: string, tone: HudToast["tone"], durationMs = 2600): void {
+    const now = performance.now();
+    setHudToasts((previous) => {
+      const next = [
+        ...previous.filter((toast) => now < toast.expiresAt),
+        {
+          id: `${Date.now()}:${Math.random()}`,
+          message,
+          tone,
+          expiresAt: now + durationMs,
+        },
+      ];
+      return next.slice(-5);
+    });
+  }
 
   useEffect(() => {
     cameraModeRef.current = cameraMode;
   }, [cameraMode]);
 
   useEffect(() => {
+    hotbarSlotsRef.current = hotbarSlots;
+  }, [hotbarSlots]);
+
+  useEffect(() => {
     selectedHotbarRef.current = selectedHotbarIndex;
-    const selectedSlot = HOTBAR_SLOTS[selectedHotbarIndex];
+    const selectedSlot = hotbarSlots[selectedHotbarIndex] ?? hotbarSlots[0] ?? HOTBAR_SLOTS[0];
     setCombatHud((previous) => ({
       ...previous,
       selectedSlotId: selectedSlot.id,
       selectedSlotLabel: selectedSlot.label,
     }));
-  }, [selectedHotbarIndex]);
+  }, [hotbarSlots, selectedHotbarIndex]);
+
+  useEffect(() => {
+    selectedCraftRecipeIndexRef.current = selectedCraftRecipeIndex;
+  }, [selectedCraftRecipeIndex]);
+
+  useEffect(() => {
+    selectedStashResourceIndexRef.current = selectedStashResourceIndex;
+  }, [selectedStashResourceIndex]);
+
+  useEffect(() => {
+    selectedTransferAmountIndexRef.current = selectedTransferAmountIndex;
+  }, [selectedTransferAmountIndex]);
+
+  useEffect(() => {
+    showDiagnosticsRef.current = showDiagnostics;
+  }, [showDiagnostics]);
+
+  useEffect(() => {
+    meshDetailModeRef.current = meshDetailMode;
+  }, [meshDetailMode]);
+
+  useEffect(() => {
+    showMinimapDebugRef.current = showMinimapDebug;
+  }, [showMinimapDebug]);
+
+  useEffect(() => {
+    inventoryResourcesRef.current = { ...inventoryHud.resources };
+  }, [inventoryHud.resources]);
+
+  useEffect(() => {
+    sharedContainerResourcesRef.current = { ...containerHud.resources };
+  }, [containerHud.resources]);
+
+  useEffect(() => {
+    privateContainerResourcesRef.current = { ...privateContainerHud.resources };
+  }, [privateContainerHud.resources]);
 
   useEffect(() => {
     let cancelled = false;
@@ -280,28 +543,50 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
 
   useEffect(() => {
     let cancelled = false;
-    void initializeMmCoreRuntime().then((mode) => {
-      if (!cancelled) {
+    void initializeMmCoreRuntime()
+      .then((mode) => {
+        if (!cancelled) {
         setMeshHud((previous) => ({
           ...previous,
           coreMode: mode,
+          workerError: null,
         }));
-      }
-    });
+          setMmCoreReady(true);
+          setMmCoreError(null);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setMmCoreReady(false);
+          setMmCoreError(error instanceof Error ? error.message : "Failed to initialize MM core wasm runtime.");
+          setMeshHud((previous) => ({
+            ...previous,
+            coreMode: "error",
+          }));
+        }
+      });
     return () => {
       cancelled = true;
     };
   }, []);
 
   useEffect(() => {
+    if (!mmCoreReady || mmCoreError) {
+      return;
+    }
+
     const mount = mountRef.current;
     if (!mount) {
       return;
     }
+    if (typeof Worker === "undefined") {
+      setMmCoreError("Web Worker support is required for MM core mesh extraction.");
+      return;
+    }
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color("#5a7cb5");
-    scene.fog = new THREE.Fog("#5a7cb5", 26, 180);
+    scene.background = new THREE.Color("#6b8db7");
+    scene.fog = new THREE.Fog("#6b8db7", 34, 220);
 
     const aspect = mount.clientWidth / mount.clientHeight;
     const camera = new THREE.PerspectiveCamera(72, aspect, 0.1, 900);
@@ -315,18 +600,22 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
     });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
     renderer.setSize(mount.clientWidth, mount.clientHeight);
-    renderer.toneMapping = THREE.NoToneMapping;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 0.92;
     mount.appendChild(renderer.domElement);
 
-    scene.add(new THREE.AmbientLight("#cfdcff", 1.25));
-    const sunlight = new THREE.DirectionalLight("#fff5e8", 0.62);
-    sunlight.position.set(64, 140, 42);
+    scene.add(new THREE.AmbientLight("#d7e8ff", 1.05));
+    scene.add(new THREE.HemisphereLight("#cce0ff", "#3d5a44", 0.48));
+    const sunlight = new THREE.DirectionalLight("#ffe3b6", 0.78);
+    sunlight.position.set(72, 150, 56);
     scene.add(sunlight);
 
     const worldRoot = new THREE.Group();
     scene.add(worldRoot);
-    const voxelGeometry = new THREE.BoxGeometry(1, 1, 1);
-    const voxelMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
+    const spawnHintRoot = new THREE.Group();
+    worldRoot.add(spawnHintRoot);
+    const meshWorkerClient = new MmCoreMeshWorkerClient();
+    const meshTimingTracker = createMeshTimingTracker(160);
 
     const spriteTextures = createSpriteTextureSet();
     const playerMaterial = new THREE.SpriteMaterial({
@@ -372,6 +661,19 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
     const groundHitPoint = new THREE.Vector3();
     const actionCooldownUntil = new Map<string, number>();
     const flashTimeouts = new Set<number>();
+    const pendingCombatActions = new Map<
+      string,
+      {
+        slotId: string;
+        slotKind: HotbarActionKind;
+        slotLabel: string;
+        slotCooldownMs: number;
+        targetId?: string;
+        targetLabel: string;
+        targetWorldX?: number;
+        targetWorldZ?: number;
+      }
+    >();
     const turnSpeed = 2.2;
     let activeChunkX = 0;
     let activeChunkZ = 0;
@@ -391,6 +693,7 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
     let lastPointerY = 0;
     let patchIntervalId: number | null = null;
     const runtimeClient: WorldRuntimeClient = createRuntimeClient({ worldSeed });
+    runtimeClientRef.current = runtimeClient;
     const runtimeState = {
       positionX: 0,
       positionZ: 0,
@@ -398,6 +701,58 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
       tick: 0,
       hasSnapshot: false,
     };
+    const spawnHintMarkers = new Map<string, THREE.Group>();
+
+    function applySpawnHintMarkers(spawnHints: RuntimeSpawnHint[]): void {
+      for (const marker of spawnHintMarkers.values()) {
+        spawnHintRoot.remove(marker);
+        disposeGroup(marker);
+      }
+      spawnHintMarkers.clear();
+
+      for (const spawnHint of spawnHints) {
+        const marker = buildSpawnHintMarker(spawnHint);
+        spawnHintMarkers.set(spawnHint.hintId, marker);
+        spawnHintRoot.add(marker);
+      }
+    }
+
+    function buildSpawnHintMarker(spawnHint: RuntimeSpawnHint): THREE.Group {
+      const marker = new THREE.Group();
+      const beaconColor = hashToColor(`spawn-hint:${spawnHint.hintId}`);
+      const shaft = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.2, 0.2, 4, 8),
+        new THREE.MeshStandardMaterial({
+          color: beaconColor,
+          emissive: beaconColor,
+          emissiveIntensity: 0.24,
+          roughness: 0.5,
+          metalness: 0.08,
+        }),
+      );
+      shaft.position.y = 2.1;
+      marker.add(shaft);
+
+      const halo = new THREE.Mesh(
+        new THREE.TorusGeometry(1.15, 0.08, 6, 24),
+        new THREE.MeshBasicMaterial({
+          color: beaconColor,
+          transparent: true,
+          opacity: 0.85,
+        }),
+      );
+      halo.rotation.x = Math.PI * 0.5;
+      halo.position.y = 0.45;
+      marker.add(halo);
+
+      marker.position.set(
+        (spawnHint.chunkX * WORLD_CONFIG.chunkSize) + (WORLD_CONFIG.chunkSize * 0.5),
+        0,
+        (spawnHint.chunkZ * WORLD_CONFIG.chunkSize) + (WORLD_CONFIG.chunkSize * 0.5),
+      );
+      marker.userData.spawnHintId = spawnHint.hintId;
+      return marker;
+    }
 
     const runtimeUnsubscribe = runtimeClient.subscribe((snapshot) => {
       const self = snapshot.players[profile.id];
@@ -419,16 +774,221 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
       applyRuntimeBlockDelta(delta);
     });
 
+    const runtimeHotbarUnsubscribe = runtimeClient.subscribeHotbarStates((state) => {
+      if (state.playerId !== profile.id) {
+        return;
+      }
+      if (state.slotIds.length > 0) {
+        setHotbarSlotIds(state.slotIds.slice(0, HOTBAR_UI_SLOT_COUNT));
+      }
+      const slotCount = state.slotIds.length > 0 ? state.slotIds.length : hotbarSlotsRef.current.length;
+      const nextIndex = clampHotbarIndex(state.selectedIndex, slotCount);
+      setSelectedHotbarIndex(nextIndex);
+    });
+
+    const runtimeInventoryUnsubscribe = runtimeClient.subscribeInventoryStates((state) => {
+      if (state.playerId !== profile.id) {
+        return;
+      }
+      setInventoryHud({
+        resources: {
+          ...Object.fromEntries(DEFAULT_RUNTIME_RESOURCE_IDS.map((resourceId) => [resourceId, 0])),
+          ...state.resources,
+        },
+        tick: state.tick,
+      });
+    });
+
+    const runtimeWorldFlagUnsubscribe = runtimeClient.subscribeWorldFlagStates((state) => {
+      setWorldFlagHud({
+        flags: { ...state.flags },
+        tick: state.tick,
+      });
+    });
+
+    const runtimeWorldDirectiveUnsubscribe = runtimeClient.subscribeWorldDirectiveStates((state) => {
+      const pushDirectiveHistory = (text: string): void => {
+        setDirectiveHistory((previous) => {
+          const next = [
+            ...previous,
+            {
+              id: `${state.tick}:${text}:${Date.now()}`,
+              tick: state.tick,
+              text,
+            },
+          ];
+          return next.slice(-8);
+        });
+      };
+      applySpawnHintMarkers(state.spawnHints);
+      const latestStoryBeat =
+        state.storyBeats.length > 0 ? state.storyBeats[state.storyBeats.length - 1] : "";
+      if (latestStoryBeat && latestStoryBeat !== lastStoryBeatRef.current) {
+        lastStoryBeatRef.current = latestStoryBeat;
+        pushDirectiveHistory(`Story beat: ${latestStoryBeat}`);
+        setStoryBeatBanner({
+          beat: latestStoryBeat,
+          tick: state.tick,
+          expiresAt: performance.now() + 4200,
+        });
+      }
+      const spawnHintSignature = state.spawnHints
+        .map((hint) => `${hint.hintId}:${hint.chunkX}:${hint.chunkZ}:${hint.label}`)
+        .sort((left, right) => left.localeCompare(right))
+        .join("|");
+      if (spawnHintSignature !== lastSpawnHintSignatureRef.current) {
+        lastSpawnHintSignatureRef.current = spawnHintSignature;
+        pushDirectiveHistory(
+          state.spawnHints.length > 0
+            ? `Spawn hints: ${formatSpawnHints(state.spawnHints)}`
+            : "Spawn hints cleared",
+        );
+      }
+      setDirectiveHud({
+        storyBeats: [...state.storyBeats],
+        spawnHints: [...state.spawnHints],
+        tick: state.tick,
+      });
+    });
+
+    const runtimeContainerStateUnsubscribe = runtimeClient.subscribeContainerStates((state) => {
+      if (state.containerId === WORLD_SHARED_CONTAINER_ID) {
+        setContainerHud({
+          containerId: state.containerId,
+          resources: {
+            ...Object.fromEntries(DEFAULT_RUNTIME_RESOURCE_IDS.map((resourceId) => [resourceId, 0])),
+            ...state.resources,
+          },
+          tick: state.tick,
+        });
+        return;
+      }
+      if (state.containerId === privateContainerId) {
+        setPrivateContainerHud({
+          containerId: state.containerId,
+          resources: {
+            ...Object.fromEntries(DEFAULT_RUNTIME_RESOURCE_IDS.map((resourceId) => [resourceId, 0])),
+            ...state.resources,
+          },
+          tick: state.tick,
+        });
+      }
+    });
+
+    const runtimeCombatUnsubscribe = runtimeClient.subscribeCombatResults((result) => {
+      if (result.playerId !== profile.id) {
+        return;
+      }
+
+      const pending = pendingCombatActions.get(result.actionId);
+      if (pending) {
+        pendingCombatActions.delete(result.actionId);
+      }
+
+      const slotLabel = pending?.slotLabel ?? result.slotId;
+      const slotKind = pending?.slotKind ?? result.kind;
+      const cooldownMs = pending?.slotCooldownMs ?? 0;
+      const targetLabel = result.targetLabel ?? pending?.targetLabel ?? "none";
+      const targetId = result.targetId ?? pending?.targetId;
+
+      if (!result.accepted) {
+        const reason =
+          result.reason === "cooldown_active" && typeof result.cooldownRemainingMs === "number"
+            ? `cooldown ${result.cooldownRemainingMs}ms`
+            : formatCombatRejectReason(result.reason);
+        updateCombatStatus({
+          lastAction: "rejected",
+          lastTarget: targetLabel,
+          targetResolution: "server-reject",
+          status: `${slotLabel} rejected (${reason})`,
+        });
+        return;
+      }
+
+      if (cooldownMs > 0) {
+        actionCooldownUntil.set(result.slotId, performance.now() + cooldownMs);
+      }
+      if (targetId) {
+        const target = targetStore.get(targetId);
+        if (target) {
+          flashTarget(target.object);
+        }
+      }
+
+      let targetResolution = "none";
+      if (pending?.targetId) {
+        targetResolution = "client-lock";
+      }
+      if (
+        pending?.targetWorldX !== undefined &&
+        pending?.targetWorldZ !== undefined &&
+        typeof result.targetWorldX === "number" &&
+        typeof result.targetWorldZ === "number"
+      ) {
+        const lockDelta = Math.hypot(
+          result.targetWorldX - pending.targetWorldX,
+          result.targetWorldZ - pending.targetWorldZ,
+        );
+        if (lockDelta > 0.25) {
+          targetResolution = "server-lock";
+        }
+      }
+
+      updateCombatStatus({
+        lastAction: slotKind === "melee" ? "attack" : slotKind === "spell" ? "cast" : "use_item",
+        lastTarget: targetLabel,
+        targetResolution,
+        status: `${slotLabel} confirmed (${targetResolution})`,
+      });
+    });
+
+    const runtimeCraftUnsubscribe = runtimeClient.subscribeCraftResults((result) => {
+      if (result.playerId !== profile.id) {
+        return;
+      }
+      const recipeLabel = CRAFT_RECIPE_BY_ID.get(result.recipeId)?.label ?? result.recipeId;
+      if (!result.accepted) {
+        const reason = formatCraftRejectReason(result.reason);
+        pushHudToast(`Craft failed: ${reason}`, "error");
+        updateCombatStatus({
+          lastAction: "craft_rejected",
+          status: `${recipeLabel} craft rejected (${reason})`,
+        });
+        return;
+      }
+      pushHudToast(`Crafted ${recipeLabel} x${result.count}`, "success");
+      updateCombatStatus({
+        lastAction: "craft",
+        status: `Crafted ${recipeLabel} x${result.count}`,
+      });
+    });
+
+    const runtimeContainerResultUnsubscribe = runtimeClient.subscribeContainerResults((result) => {
+      if (result.playerId !== profile.id) {
+        return;
+      }
+      if (!result.accepted) {
+        const reason = formatContainerRejectReason(result.reason);
+        pushHudToast(`Stash ${result.operation} failed: ${reason}`, "error");
+        updateCombatStatus({
+          lastAction: "stash_rejected",
+          status: `Stash ${result.operation} rejected (${reason})`,
+        });
+        return;
+      }
+      pushHudToast(`Stash ${result.operation} ${result.resourceId} x${result.amount}`, "info");
+      updateCombatStatus({
+        lastAction: "stash",
+        status: `Stash ${result.operation} ${result.resourceId} x${result.amount}`,
+      });
+    });
+
     runtimeClient.join({
       worldSeed,
       playerId: profile.id,
       startX: 0,
       startZ: 0,
     });
-
-    function chunkIndex(positionAxis: number): number {
-      return Math.floor(positionAxis / WORLD_CONFIG.chunkSize);
-    }
 
     function chunkKey(chunkX: number, chunkZ: number): string {
       return `${chunkX}:${chunkZ}`;
@@ -456,7 +1016,7 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
       group.position.set(chunkX * WORLD_CONFIG.chunkSize, 0, chunkZ * WORLD_CONFIG.chunkSize);
 
       const voxelChunk = createVoxelChunkData(chunkX, chunkZ, worldSeed, {
-        blockSize: 2,
+        blockSize: 1.6,
         maxHeight: 9,
       });
       const chunkData = generateChunkData(chunkX, chunkZ, worldSeed);
@@ -496,8 +1056,8 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
         chunkZ,
         group,
         voxelChunk,
-        voxelMesh: null,
-        voxelInstances: [],
+        voxelRenderMesh: null,
+        meshRequestVersion: 0,
         overlayGroup,
         overlayState: createPlaceholderOverlayState(DEFAULT_PLACEHOLDER_SLOTS),
         intentsSubmitted: false,
@@ -510,50 +1070,126 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
     }
 
     function renderVoxelChunk(record: LoadedChunkRecord): void {
-      if (record.voxelMesh) {
-        record.group.remove(record.voxelMesh);
+      if (record.voxelRenderMesh) {
+        record.group.remove(record.voxelRenderMesh);
+        record.voxelRenderMesh.geometry.dispose();
+        if (Array.isArray(record.voxelRenderMesh.material)) {
+          record.voxelRenderMesh.material.forEach((material) => material.dispose());
+        } else {
+          record.voxelRenderMesh.material.dispose();
+        }
+        record.voxelRenderMesh = null;
       }
 
-      const blocks = listVoxelBlocks(record.voxelChunk);
+      const blockCount = record.voxelChunk.blocks.size;
+      record.group.userData.meshStats = {
+        quads: blockCount * 6,
+        vertices: blockCount * 24,
+        indices: blockCount * 36,
+      };
       const occupancyBuffer = buildChunkOccupancyBuffer(record.voxelChunk);
-      const meshStats = getChunkMeshStatsFromOccupancy(
-        occupancyBuffer.width,
-        occupancyBuffer.height,
-        occupancyBuffer.depth,
-        occupancyBuffer.occupancy,
-      );
-      const mesh = new THREE.InstancedMesh(voxelGeometry, voxelMaterial, blocks.length);
-      mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-      mesh.userData.skipDispose = true;
-      mesh.userData.isVoxelChunk = true;
-      mesh.userData.chunkKey = chunkKey(record.chunkX, record.chunkZ);
+      record.meshRequestVersion += 1;
+      const requestVersion = record.meshRequestVersion;
+      void requestChunkMeshStats(record, occupancyBuffer, requestVersion);
+    }
 
-      const matrix = new THREE.Matrix4();
-      const rotation = new THREE.Quaternion();
-      const position = new THREE.Vector3();
-      const scale = new THREE.Vector3(record.voxelChunk.blockSize, record.voxelChunk.blockSize, record.voxelChunk.blockSize);
-      const color = new THREE.Color();
-      const instancePositions: VoxelBlockPosition[] = [];
+    async function requestChunkMeshStats(
+      record: LoadedChunkRecord,
+      occupancyBuffer: ReturnType<typeof buildChunkOccupancyBuffer>,
+      requestVersion: number,
+    ): Promise<void> {
+      try {
+        const extractStart = performance.now();
+        const chunkMesh = await meshWorkerClient.extract(
+          occupancyBuffer.width,
+          occupancyBuffer.height,
+          occupancyBuffer.depth,
+          occupancyBuffer.occupancy,
+        );
+        const extractMs = performance.now() - extractStart;
+        if (!isRunning || record.meshRequestVersion !== requestVersion) {
+          return;
+        }
+        const key = chunkKey(record.chunkX, record.chunkZ);
+        if (!chunkStore.has(key)) {
+          return;
+        }
 
-      blocks.forEach((block, index) => {
-        const chunkSpace = localVoxelToChunkSpace(record.voxelChunk, block);
-        position.set(chunkSpace.x, chunkSpace.y, chunkSpace.z);
-        matrix.compose(position, rotation, scale);
-        mesh.setMatrixAt(index, matrix);
-        color.set(blockTypeColor(block.type));
-        mesh.setColorAt(index, color);
-        instancePositions.push({ x: block.x, y: block.y, z: block.z });
-      });
+        const uploadStart = performance.now();
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute("position", new THREE.BufferAttribute(chunkMesh.positions, 3));
+        geometry.setAttribute("normal", new THREE.BufferAttribute(chunkMesh.normals, 3));
+        geometry.setAttribute("uv", new THREE.BufferAttribute(chunkMesh.uvs, 2));
+        geometry.setAttribute(
+          "color",
+          new THREE.BufferAttribute(buildChunkVertexColors(chunkMesh.positions, record.voxelChunk.maxHeight), 3),
+        );
+        geometry.setIndex(new THREE.BufferAttribute(chunkMesh.indices, 1));
+        geometry.computeBoundingSphere();
 
-      mesh.instanceMatrix.needsUpdate = true;
-      if (mesh.instanceColor) {
-        mesh.instanceColor.needsUpdate = true;
+        const renderMesh = new THREE.Mesh(
+          geometry,
+          new THREE.MeshLambertMaterial({
+            vertexColors: true,
+            side: THREE.DoubleSide,
+          }),
+        );
+        const half = WORLD_CONFIG.chunkSize * 0.5;
+        renderMesh.position.set(-half, 0, -half);
+        renderMesh.scale.setScalar(record.voxelChunk.blockSize);
+        renderMesh.userData.isVoxelChunk = true;
+        renderMesh.userData.chunkKey = key;
+
+        if (record.voxelRenderMesh) {
+          record.group.remove(record.voxelRenderMesh);
+          record.voxelRenderMesh.geometry.dispose();
+          if (Array.isArray(record.voxelRenderMesh.material)) {
+            record.voxelRenderMesh.material.forEach((material) => material.dispose());
+          } else {
+            record.voxelRenderMesh.material.dispose();
+          }
+        }
+        record.voxelRenderMesh = renderMesh;
+        record.group.add(renderMesh);
+        const uploadMs = performance.now() - uploadStart;
+
+        record.group.userData.meshStats = {
+          quads: chunkMesh.quads,
+          vertices: chunkMesh.vertices,
+          indices: chunkMesh.indexCount,
+        };
+        const timingRollup = recordMeshTiming(
+          meshTimingTracker,
+          key,
+          extractMs,
+          uploadMs,
+        );
+        const activeChunkTiming = getChunkMeshTimingAverages(
+          meshTimingTracker,
+          chunkKey(activeChunkX, activeChunkZ),
+        );
+        setMeshHud((previous) => ({
+          ...previous,
+          extractMs,
+          uploadMs,
+          extractAvgMs: timingRollup.extractAvgMs,
+          uploadAvgMs: timingRollup.uploadAvgMs,
+          extractP95Ms: timingRollup.extractP95Ms,
+          uploadP95Ms: timingRollup.uploadP95Ms,
+          activeChunkExtractAvgMs: activeChunkTiming.extractAvgMs,
+          activeChunkUploadAvgMs: activeChunkTiming.uploadAvgMs,
+          trackedChunks: timingRollup.trackedChunks,
+          workerError: null,
+        }));
+      } catch (error) {
+        if (!isRunning) {
+          return;
+        }
+        setMeshHud((previous) => ({
+          ...previous,
+          workerError: error instanceof Error ? error.message : "MM core mesh worker failed.",
+        }));
       }
-
-      record.voxelMesh = mesh;
-      record.voxelInstances = instancePositions;
-      record.group.userData.meshStats = meshStats;
-      record.group.add(mesh);
     }
 
     function buildEntity(
@@ -775,7 +1411,10 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
     }
 
     function updateCombatStatus(partial: Partial<CombatHudState>): void {
-      const selectedSlot = HOTBAR_SLOTS[selectedHotbarRef.current] ?? HOTBAR_SLOTS[0];
+      const selectedSlot = hotbarSlotsRef.current[selectedHotbarRef.current] ?? hotbarSlotsRef.current[0];
+      if (!selectedSlot) {
+        return;
+      }
       const remaining = Math.max(
         0,
         Math.ceil((actionCooldownUntil.get(selectedSlot.id) ?? 0) - performance.now()),
@@ -790,7 +1429,7 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
     }
 
     function getSelectedHotbarSlot(): HotbarSlot {
-      return HOTBAR_SLOTS[selectedHotbarRef.current] ?? HOTBAR_SLOTS[0];
+      return hotbarSlotsRef.current[selectedHotbarRef.current] ?? hotbarSlotsRef.current[0] ?? HOTBAR_SLOTS[0];
     }
 
     function findNearestTarget(worldX: number, worldZ: number, maxDistance: number): string | null {
@@ -845,22 +1484,22 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
       clientY: number,
     ): {
       record: LoadedChunkRecord;
-      local: VoxelBlockPosition;
-      normal: THREE.Vector3;
+      breakPosition: VoxelBlockPosition;
+      placePosition: VoxelBlockPosition;
     } | null {
       setRayFromClient(clientX, clientY);
       const meshes = Array.from(chunkStore.values())
-        .map((record) => record.voxelMesh)
-        .filter((mesh): mesh is THREE.InstancedMesh => mesh !== null);
+        .map((record) => record.voxelRenderMesh)
+        .filter((mesh): mesh is THREE.Mesh => mesh !== null);
       if (meshes.length === 0) {
         return null;
       }
 
       const hit = raycaster.intersectObjects(meshes, false)[0];
-      if (!hit || hit.instanceId === undefined) {
+      if (!hit || !hit.face) {
         return null;
       }
-      const mesh = hit.object as THREE.InstancedMesh;
+      const mesh = hit.object as THREE.Mesh;
       const chunkId = mesh.userData.chunkKey as string | undefined;
       if (!chunkId) {
         return null;
@@ -869,12 +1508,31 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
       if (!record) {
         return null;
       }
-      const local = record.voxelInstances[hit.instanceId];
-      if (!local) {
+
+      const worldNormal = hit.face.normal.clone().transformDirection(mesh.matrixWorld).normalize();
+      const surfaceHit = resolveVoxelSurfaceHit(
+        record.voxelChunk,
+        record.chunkX,
+        record.chunkZ,
+        {
+          x: hit.point.x,
+          y: hit.point.y,
+          z: hit.point.z,
+        },
+        {
+          x: worldNormal.x,
+          y: worldNormal.y,
+          z: worldNormal.z,
+        },
+      );
+      if (!surfaceHit) {
         return null;
       }
-      const normal = hit.face?.normal ? hit.face.normal.clone().round() : new THREE.Vector3(0, 1, 0);
-      return { record, local, normal };
+      return {
+        record,
+        breakPosition: surfaceHit.breakPosition,
+        placePosition: surfaceHit.placePosition,
+      };
     }
 
     function applyRuntimeBlockDelta(delta: RuntimeBlockDelta): void {
@@ -937,11 +1595,7 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
           return;
         }
 
-        const placePosition: VoxelBlockPosition = {
-          x: voxelHit.local.x + Math.round(voxelHit.normal.x),
-          y: voxelHit.local.y + Math.round(voxelHit.normal.y),
-          z: voxelHit.local.z + Math.round(voxelHit.normal.z),
-        };
+        const placePosition: VoxelBlockPosition = voxelHit.placePosition;
 
         if (!isValidPosition(voxelHit.record.voxelChunk, placePosition)) {
           updateCombatStatus({
@@ -977,11 +1631,31 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
       }
 
       if (slot.targetMode === "self" && slot.kind !== "melee") {
-        actionCooldownUntil.set(slot.id, now + slot.cooldownMs);
+        const actionId = createEventId();
+        pendingCombatActions.set(actionId, {
+          slotId: slot.id,
+          slotKind: slot.kind,
+          slotLabel: slot.label,
+          slotCooldownMs: slot.cooldownMs,
+          targetId: profile.id,
+          targetLabel: playerLabel,
+          targetWorldX: playerPosition.x,
+          targetWorldZ: playerPosition.z,
+        });
+        runtimeClient.submitCombatAction(profile.id, {
+          actionId,
+          slotId: slot.id,
+          kind: slot.kind,
+          targetId: profile.id,
+          targetLabel: playerLabel,
+          targetWorldX: playerPosition.x,
+          targetWorldZ: playerPosition.z,
+        });
         updateCombatStatus({
-          lastAction: slot.kind === "item" ? "use_item" : "self_cast",
+          lastAction: "request",
           lastTarget: playerLabel,
-          status: `${slot.label} used on self`,
+          targetResolution: "pending",
+          status: `${slot.label} request sent (pending)`,
         });
         return;
       }
@@ -1010,13 +1684,32 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
           return;
         }
 
-        actionCooldownUntil.set(slot.id, now + slot.cooldownMs);
         yaw = Math.atan2(dx, dz);
-        flashTarget(target.object);
+        const actionId = createEventId();
+        pendingCombatActions.set(actionId, {
+          slotId: slot.id,
+          slotKind: slot.kind,
+          slotLabel: slot.label,
+          slotCooldownMs: slot.cooldownMs,
+          targetId: target.id,
+          targetLabel: target.label,
+          targetWorldX: target.worldX,
+          targetWorldZ: target.worldZ,
+        });
+        runtimeClient.submitCombatAction(profile.id, {
+          actionId,
+          slotId: slot.id,
+          kind: slot.kind,
+          targetId: target.id,
+          targetLabel: target.label,
+          targetWorldX: target.worldX,
+          targetWorldZ: target.worldZ,
+        });
         updateCombatStatus({
-          lastAction: slot.kind === "melee" ? "attack" : slot.kind === "spell" ? "cast" : "use_item",
+          lastAction: "request",
           lastTarget: target.label,
-          status: `${slot.label} hit ${target.label} (${distance.toFixed(1)}m)`,
+          targetResolution: "pending",
+          status: `${slot.label} request sent (${distance.toFixed(1)}m, pending)`,
         });
         return;
       }
@@ -1027,14 +1720,14 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
           action: "break",
           chunkX: voxelHit.record.chunkX,
           chunkZ: voxelHit.record.chunkZ,
-          x: voxelHit.local.x,
-          y: voxelHit.local.y,
-          z: voxelHit.local.z,
+          x: voxelHit.breakPosition.x,
+          y: voxelHit.breakPosition.y,
+          z: voxelHit.breakPosition.z,
         });
         actionCooldownUntil.set(slot.id, now + Math.max(180, Math.floor(slot.cooldownMs * 0.4)));
         updateCombatStatus({
           lastAction: "break_block",
-          lastTarget: `(${voxelHit.local.x},${voxelHit.local.y},${voxelHit.local.z})`,
+          lastTarget: `(${voxelHit.breakPosition.x},${voxelHit.breakPosition.y},${voxelHit.breakPosition.z})`,
           status: `${slot.label} break request sent`,
         });
         return;
@@ -1082,9 +1775,227 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
 
     function onKeyDown(event: KeyboardEvent): void {
       const key = event.key.toLowerCase();
+      if (key === "f3") {
+        const next = !showDiagnosticsRef.current;
+        setShowDiagnostics(next);
+        updateCombatStatus({
+          lastAction: "diagnostics_toggle",
+          status: `Diagnostics ${next ? "enabled" : "hidden"}`,
+        });
+        event.preventDefault();
+        return;
+      }
+      if (key === "f4") {
+        const nextMode = meshDetailModeRef.current === "detailed" ? "basic" : "detailed";
+        setMeshDetailMode(nextMode);
+        updateCombatStatus({
+          lastAction: "diagnostics_toggle",
+          status: `Mesh detail mode: ${nextMode}`,
+        });
+        event.preventDefault();
+        return;
+      }
+      if (key === "f5") {
+        const next = !showMinimapDebugRef.current;
+        setShowMinimapDebug(next);
+        updateCombatStatus({
+          lastAction: "diagnostics_toggle",
+          status: `Minimap debug ${next ? "enabled" : "hidden"}`,
+        });
+        event.preventDefault();
+        return;
+      }
       const hotbarIndex = HOTBAR_KEY_TO_INDEX.get(key);
       if (hotbarIndex !== undefined) {
-        setSelectedHotbarIndex(hotbarIndex);
+        const nextIndex = clampHotbarIndex(hotbarIndex, hotbarSlotsRef.current.length);
+        setSelectedHotbarIndex(nextIndex);
+        runtimeClient.selectHotbarSlot(profile.id, nextIndex);
+        event.preventDefault();
+        return;
+      }
+      const craftRecipeIndex = resolveCraftRecipeIndexForKey(key);
+      if (craftRecipeIndex !== undefined) {
+        const nextCraftIndex = clampCraftRecipeIndex(craftRecipeIndex);
+        setSelectedCraftRecipeIndex(nextCraftIndex);
+        const recipe = resolveCraftRecipeByIndex(nextCraftIndex);
+        updateCombatStatus({
+          lastAction: "craft_select",
+          status: `Craft selected: ${recipe.label} (${recipe.summary})`,
+        });
+        event.preventDefault();
+        return;
+      }
+      if (key === "r") {
+        const selectedRecipe = resolveCraftRecipeByIndex(selectedCraftRecipeIndexRef.current);
+        runtimeClient.submitCraftRequest(profile.id, {
+          actionId: createEventId(),
+          recipeId: selectedRecipe.id,
+          count: 1,
+        });
+        updateCombatStatus({
+          lastAction: "craft_request",
+          status: `Craft request sent (${selectedRecipe.label}; ${selectedRecipe.summary})`,
+        });
+        event.preventDefault();
+        return;
+      }
+      if (key === "n") {
+        const nextIndex = cycleRuntimeResourceIndex(selectedStashResourceIndexRef.current, -1);
+        setSelectedStashResourceIndex(nextIndex);
+        const resourceId = resolveRuntimeResourceId(nextIndex);
+        updateCombatStatus({
+          lastAction: "resource_select",
+          status: `Stash resource selected: ${formatRuntimeResourceLabel(resourceId)}`,
+        });
+        event.preventDefault();
+        return;
+      }
+      if (key === "m") {
+        const nextIndex = cycleRuntimeResourceIndex(selectedStashResourceIndexRef.current, 1);
+        setSelectedStashResourceIndex(nextIndex);
+        const resourceId = resolveRuntimeResourceId(nextIndex);
+        updateCombatStatus({
+          lastAction: "resource_select",
+          status: `Stash resource selected: ${formatRuntimeResourceLabel(resourceId)}`,
+        });
+        event.preventDefault();
+        return;
+      }
+      if (key === "j") {
+        const nextIndex = cycleTransferAmountIndex(selectedTransferAmountIndexRef.current, -1);
+        setSelectedTransferAmountIndex(nextIndex);
+        const amount = resolveTransferAmount(nextIndex);
+        updateCombatStatus({
+          lastAction: "transfer_amount_select",
+          status: `Stash transfer amount selected: x${amount}`,
+        });
+        event.preventDefault();
+        return;
+      }
+      if (key === "k") {
+        const nextIndex = cycleTransferAmountIndex(selectedTransferAmountIndexRef.current, 1);
+        setSelectedTransferAmountIndex(nextIndex);
+        const amount = resolveTransferAmount(nextIndex);
+        updateCombatStatus({
+          lastAction: "transfer_amount_select",
+          status: `Stash transfer amount selected: x${amount}`,
+        });
+        event.preventDefault();
+        return;
+      }
+      const selectedResourceId = resolveRuntimeResourceId(selectedStashResourceIndexRef.current);
+      const selectedResourceLabel = formatRuntimeResourceLabel(selectedResourceId);
+      const selectedAmount = resolveTransferAmount(selectedTransferAmountIndexRef.current);
+      const transferModifier = resolveTransferModifier({
+        shiftKey: event.shiftKey,
+        ctrlKey: event.ctrlKey,
+        metaKey: event.metaKey,
+        altKey: event.altKey,
+      });
+      const transferModeLabel =
+        transferModifier === "all" ? "all" : transferModifier === "half" ? "half" : "base";
+      const resolveTransferAmountFor = (operation: "deposit" | "withdraw", containerId: string): number => {
+        const sourceAmount =
+          operation === "deposit"
+            ? (inventoryResourcesRef.current[selectedResourceId] ?? 0)
+            : containerId === WORLD_SHARED_CONTAINER_ID
+              ? (sharedContainerResourcesRef.current[selectedResourceId] ?? 0)
+              : (privateContainerResourcesRef.current[selectedResourceId] ?? 0);
+        return resolveRequestedTransferAmount(selectedAmount, sourceAmount, transferModifier);
+      };
+      if (key === "[") {
+        const transferAmount = resolveTransferAmountFor("deposit", WORLD_SHARED_CONTAINER_ID);
+        if (transferAmount <= 0) {
+          updateCombatStatus({
+            lastAction: "stash_request_blocked",
+            status: `No ${selectedResourceLabel} available to deposit`,
+          });
+          event.preventDefault();
+          return;
+        }
+        runtimeClient.submitContainerAction(profile.id, {
+          actionId: createEventId(),
+          containerId: WORLD_SHARED_CONTAINER_ID,
+          operation: "deposit",
+          resourceId: selectedResourceId,
+          amount: transferAmount,
+        });
+        updateCombatStatus({
+          lastAction: "stash_request",
+          status: `Stash deposit request sent (${selectedResourceLabel} x${transferAmount}; ${transferModeLabel})`,
+        });
+        event.preventDefault();
+        return;
+      }
+      if (key === "]") {
+        const transferAmount = resolveTransferAmountFor("withdraw", WORLD_SHARED_CONTAINER_ID);
+        if (transferAmount <= 0) {
+          updateCombatStatus({
+            lastAction: "stash_request_blocked",
+            status: `No ${selectedResourceLabel} available in shared stash`,
+          });
+          event.preventDefault();
+          return;
+        }
+        runtimeClient.submitContainerAction(profile.id, {
+          actionId: createEventId(),
+          containerId: WORLD_SHARED_CONTAINER_ID,
+          operation: "withdraw",
+          resourceId: selectedResourceId,
+          amount: transferAmount,
+        });
+        updateCombatStatus({
+          lastAction: "stash_request",
+          status: `Stash withdraw request sent (${selectedResourceLabel} x${transferAmount}; ${transferModeLabel})`,
+        });
+        event.preventDefault();
+        return;
+      }
+      if (key === ";") {
+        const transferAmount = resolveTransferAmountFor("deposit", privateContainerId);
+        if (transferAmount <= 0) {
+          updateCombatStatus({
+            lastAction: "stash_request_blocked",
+            status: `No ${selectedResourceLabel} available to deposit`,
+          });
+          event.preventDefault();
+          return;
+        }
+        runtimeClient.submitContainerAction(profile.id, {
+          actionId: createEventId(),
+          containerId: privateContainerId,
+          operation: "deposit",
+          resourceId: selectedResourceId,
+          amount: transferAmount,
+        });
+        updateCombatStatus({
+          lastAction: "stash_request",
+          status: `Private stash deposit request sent (${selectedResourceLabel} x${transferAmount}; ${transferModeLabel})`,
+        });
+        event.preventDefault();
+        return;
+      }
+      if (key === "'") {
+        const transferAmount = resolveTransferAmountFor("withdraw", privateContainerId);
+        if (transferAmount <= 0) {
+          updateCombatStatus({
+            lastAction: "stash_request_blocked",
+            status: `No ${selectedResourceLabel} available in private stash`,
+          });
+          event.preventDefault();
+          return;
+        }
+        runtimeClient.submitContainerAction(profile.id, {
+          actionId: createEventId(),
+          containerId: privateContainerId,
+          operation: "withdraw",
+          resourceId: selectedResourceId,
+          amount: transferAmount,
+        });
+        updateCombatStatus({
+          lastAction: "stash_request",
+          status: `Private stash withdraw request sent (${selectedResourceLabel} x${transferAmount}; ${transferModeLabel})`,
+        });
         event.preventDefault();
         return;
       }
@@ -1326,11 +2237,18 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
           | { quads: number; vertices: number; indices: number }
           | undefined;
         if (stats) {
+          const activeChunkTiming = getChunkMeshTimingAverages(
+            meshTimingTracker,
+            chunkKey(activeChunkX, activeChunkZ),
+          );
           setMeshHud((previous) => ({
             ...previous,
             quads: stats.quads,
             vertices: stats.vertices,
             indices: stats.indices,
+            activeChunkExtractAvgMs: activeChunkTiming.extractAvgMs,
+            activeChunkUploadAvgMs: activeChunkTiming.uploadAvgMs,
+            trackedChunks: meshTimingTracker.chunkTimings.size,
           }));
         }
         lastHudUpdate = timestamp;
@@ -1360,12 +2278,21 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
       }
       runtimeUnsubscribe();
       runtimeBlockUnsubscribe();
+      runtimeHotbarUnsubscribe();
+      runtimeInventoryUnsubscribe();
+      runtimeWorldFlagUnsubscribe();
+      runtimeWorldDirectiveUnsubscribe();
+      runtimeContainerStateUnsubscribe();
+      runtimeCombatUnsubscribe();
+      runtimeCraftUnsubscribe();
+      runtimeContainerResultUnsubscribe();
+      pendingCombatActions.clear();
       runtimeClient.leave(profile.id);
       runtimeClient.dispose();
+      runtimeClientRef.current = null;
+      meshWorkerClient.dispose();
 
       disposeGroup(worldRoot);
-      voxelGeometry.dispose();
-      voxelMaterial.dispose();
       playerMaterial.dispose();
       renderer.dispose();
       disposeTextureSet(spriteTextures);
@@ -1380,52 +2307,126 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
     profile.appearance.accentColor,
     profile.id,
     profile.world.id,
+    mmCoreError,
+    mmCoreReady,
+    privateContainerId,
     worldSeed,
   ]);
 
   return (
     <section className="world-container">
       <div className="world-canvas" ref={mountRef}>
-        <div className={`gameplay-overlay mode-${cameraMode}`}>
-          <div className="crosshair" aria-hidden />
-          <div className="hud-top-row">
-            <p className="hud-mode-chip">{cameraMode === "first-person" ? "First Person" : "Third Person"}</p>
-            <p className="hud-status-chip">{combatHud.status}</p>
-          </div>
-          {cameraMode === "first-person" ? <div className="first-person-weapon" aria-hidden /> : null}
-          <div className="hud-bottom-dock">
-            <div className="hearts-row" aria-label="health">
-              {Array.from({ length: MAX_HEARTS }, (_, index) => (
-                <span
-                  key={`heart-${index}`}
-                  className={`heart-icon ${index < CURRENT_HEARTS ? "full" : "empty"}`}
-                  aria-hidden
-                />
-              ))}
+        {!mmCoreReady && !mmCoreError ? (
+          <div className="world-blocking-message">Initializing MM core wasm runtime...</div>
+        ) : null}
+        {mmCoreError ? <div className="world-blocking-message error">{mmCoreError}</div> : null}
+        {mmCoreReady && !mmCoreError ? (
+          <div className={`gameplay-overlay mode-${cameraMode}`}>
+            <div className="crosshair" aria-hidden />
+            <div className="hud-top-row">
+              <p className="hud-mode-chip">{cameraMode === "first-person" ? "First Person" : "Third Person"}</p>
+              <p className="hud-status-chip">{combatHud.status}</p>
             </div>
-            <div className="hotbar-strip">
-              {HOTBAR_UI_SLOTS.map((slot, index) =>
-                slot ? (
+            {storyBeatBanner && performance.now() < storyBeatBanner.expiresAt ? (
+              <div className="story-beat-banner" role="status" aria-live="polite">
+                <span className="story-beat-label">Story Beat</span>
+                <span className="story-beat-text">{storyBeatBanner.beat}</span>
+              </div>
+            ) : null}
+            {showMinimapDebug ? (
+              <div className="debug-minimap" aria-label="chunk minimap">
+                <div className="debug-minimap-head">
+                  <span>
+                    Chunk {hud.chunkX},{hud.chunkZ}
+                  </span>
+                  <span>Tick {runtimeHud.tick}</span>
+                </div>
+                <div className="debug-minimap-grid">
+                  <div className="debug-minimap-player" style={{ left: "50%", top: "50%" }} />
+                  {directiveHud.spawnHints
+                    .map((hint) => {
+                      const deltaChunkX = hint.chunkX - hud.chunkX;
+                      const deltaChunkZ = hint.chunkZ - hud.chunkZ;
+                      if (Math.abs(deltaChunkX) > 3 || Math.abs(deltaChunkZ) > 3) {
+                        return null;
+                      }
+                      const left = 50 + (deltaChunkX * 14);
+                      const top = 50 + (deltaChunkZ * 14);
+                      return (
+                        <div
+                          key={hint.hintId}
+                          className="debug-minimap-hint"
+                          style={{ left: `${left}%`, top: `${top}%` }}
+                          title={`${hint.label} @ ${hint.chunkX},${hint.chunkZ}`}
+                        />
+                      );
+                    })
+                    .filter((node) => node !== null)}
+                </div>
+                <div className="debug-minimap-foot">
+                  <span>Loaded {hud.chunkCount}</span>
+                  <span>{runtimeHud.mode}</span>
+                </div>
+              </div>
+            ) : null}
+            {activeHudToasts.length > 0 ? (
+              <div className="hud-toast-stack" aria-live="polite" aria-atomic="false">
+                {activeHudToasts.map((toast) => (
+                  <div key={toast.id} className={`hud-toast ${toast.tone}`}>
+                    {toast.message}
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {cameraMode === "first-person" ? <div className="first-person-weapon" aria-hidden /> : null}
+            <div className="hud-bottom-dock">
+              <div className="hearts-row" aria-label="health">
+                {Array.from({ length: MAX_HEARTS }, (_, index) => (
+                  <span
+                    key={`heart-${index}`}
+                    className={`heart-icon ${index < CURRENT_HEARTS ? "full" : "empty"}`}
+                    aria-hidden
+                  />
+                ))}
+              </div>
+              <div className="hotbar-strip">
+                {hotbarUiSlots.map((slot, index) =>
+                  slot ? (
+                    <button
+                      key={slot.id}
+                      type="button"
+                      className={`hud-hotbar-slot ${selectedHotbarIndex === index ? "active" : ""}`}
+                      onClick={() => handleHotbarSelect(index)}
+                      aria-label={`${slot.label} (${slot.keybind})`}
+                    >
+                      <span className="slot-key">{slot.keybind}</span>
+                      <span className="slot-label">{slot.label}</span>
+                      {selectedHotbarIndex === index && combatHud.selectedCooldownMs > 0 ? (
+                        <span className="slot-cooldown">{combatHud.selectedCooldownMs}ms</span>
+                      ) : null}
+                    </button>
+                  ) : (
+                    <div key={`empty-slot-${index}`} className="hud-hotbar-slot empty" aria-hidden />
+                  ),
+                )}
+              </div>
+              <div className="craft-strip" aria-label="craft recipes">
+                {DEFAULT_RUNTIME_CRAFT_RECIPES.map((recipe, index) => (
                   <button
-                    key={slot.id}
+                    key={recipe.id}
                     type="button"
-                    className={`hud-hotbar-slot ${selectedHotbarIndex === index ? "active" : ""}`}
-                    onClick={() => setSelectedHotbarIndex(index)}
-                    aria-label={`${slot.label} (${slot.keybind})`}
+                    className={`hud-craft-slot ${selectedCraftRecipeIndex === index ? "active" : ""}`}
+                    onClick={() => handleCraftRecipeSelect(index)}
+                    aria-label={`${recipe.label} (${recipe.keybind})`}
                   >
-                    <span className="slot-key">{slot.keybind}</span>
-                    <span className="slot-label">{slot.label}</span>
-                    {selectedHotbarIndex === index && combatHud.selectedCooldownMs > 0 ? (
-                      <span className="slot-cooldown">{combatHud.selectedCooldownMs}ms</span>
-                    ) : null}
+                    <span className="slot-key">{recipe.keybind}</span>
+                    <span className="slot-label">{recipe.label}</span>
                   </button>
-                ) : (
-                  <div key={`empty-slot-${index}`} className="hud-hotbar-slot empty" aria-hidden />
-                ),
-              )}
+                ))}
+              </div>
             </div>
           </div>
-        </div>
+        ) : null}
       </div>
       <aside className="world-hud dex-shell">
         <h2>Trainer: {playerLabel}</h2>
@@ -1445,6 +2446,46 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
             Third Person
           </button>
         </div>
+        <div className="diag-row">
+          <button
+            type="button"
+            className={`button button-secondary ${showDiagnostics ? "button-active" : ""}`}
+            onClick={() => setShowDiagnostics((previous) => !previous)}
+          >
+            Diagnostics {showDiagnostics ? "On" : "Off"}
+          </button>
+          <button
+            type="button"
+            className="button button-secondary"
+            onClick={() => setMeshDetailMode((previous) => (previous === "detailed" ? "basic" : "detailed"))}
+          >
+            Mesh {meshDetailMode}
+          </button>
+        </div>
+        <div className="stash-resource-strip" aria-label="stash resource selector">
+          {DEFAULT_RUNTIME_RESOURCE_IDS.map((resourceId, index) => (
+            <button
+              key={resourceId}
+              type="button"
+              className={`stash-resource-button ${selectedStashResourceId === resourceId ? "active" : ""}`}
+              onClick={() => handleStashResourceSelect(index)}
+            >
+              {formatRuntimeResourceLabel(resourceId)}
+            </button>
+          ))}
+        </div>
+        <div className="stash-transfer-strip" aria-label="stash transfer amount selector">
+          {DEFAULT_STASH_TRANSFER_AMOUNTS.map((amount, index) => (
+            <button
+              key={`transfer-amount-${amount}`}
+              type="button"
+              className={`stash-resource-button ${selectedTransferAmount === amount ? "active" : ""}`}
+              onClick={() => handleTransferAmountSelect(index)}
+            >
+              x{amount}
+            </button>
+          ))}
+        </div>
         <ul>
           <li>X: {hud.x.toFixed(1)}</li>
           <li>Z: {hud.z.toFixed(1)}</li>
@@ -1457,12 +2498,46 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
           <li>Camera: {cameraMode}</li>
           <li>Runtime Mode: {runtimeHud.mode}</li>
           <li>Runtime Tick: {runtimeHud.tick}</li>
-          <li>Mesh Core: {meshHud.coreMode}</li>
-          <li>Mesh Quads: {meshHud.quads}</li>
-          <li>Mesh Verts: {meshHud.vertices}</li>
-          <li>Orchestrator Events: {orchestratorHud.eventsSent}</li>
-          <li>Directives Received: {orchestratorHud.directivesReceived}</li>
-          <li>Last Event: {orchestratorHud.lastEventType}</li>
+          <li>World Flags Tick: {worldFlagHud.tick}</li>
+          <li>World Flags: {formatWorldFlags(worldFlagHud.flags)}</li>
+          <li>Directive Tick: {directiveHud.tick}</li>
+          <li>
+            Story Beat:{" "}
+            {directiveHud.storyBeats.length > 0
+              ? directiveHud.storyBeats[directiveHud.storyBeats.length - 1]
+              : "none"}
+          </li>
+          <li>Spawn Hints: {formatSpawnHints(directiveHud.spawnHints)}</li>
+          <li>Diagnostics: {showDiagnostics ? `on (${meshDetailMode})` : "off"}</li>
+          <li>Stash Resource: {formatRuntimeResourceLabel(selectedStashResourceId)}</li>
+          <li>Transfer Amount: x{selectedTransferAmount}</li>
+          <li>Transfer Modifiers: Shift=half, Ctrl/Alt/Cmd=all</li>
+          <li>Inventory: {formatResourceSummary(inventoryHud.resources)}</li>
+          <li>Inventory Tick: {inventoryHud.tick}</li>
+          <li>Stash ({containerHud.containerId}): {formatResourceSummary(containerHud.resources)}</li>
+          <li>Stash Tick: {containerHud.tick}</li>
+          <li>Private Stash ({privateContainerHud.containerId || "loading"}): {formatResourceSummary(privateContainerHud.resources)}</li>
+          <li>Private Stash Tick: {privateContainerHud.tick}</li>
+          {showDiagnostics ? <li>Mesh Core: {meshHud.coreMode}</li> : null}
+          {showDiagnostics ? <li>Mesh Quads: {meshHud.quads}</li> : null}
+          {showDiagnostics ? <li>Mesh Verts: {meshHud.vertices}</li> : null}
+          {showDiagnostics ? <li>Orchestrator Events: {orchestratorHud.eventsSent}</li> : null}
+          {showDiagnostics ? <li>Directives Received: {orchestratorHud.directivesReceived}</li> : null}
+          {showDiagnostics ? <li>Last Event: {orchestratorHud.lastEventType}</li> : null}
+          {showDiagnostics && meshDetailMode === "detailed" ? <li>Mesh Extract ms: {meshHud.extractMs.toFixed(2)}</li> : null}
+          {showDiagnostics && meshDetailMode === "detailed" ? <li>Mesh Upload ms: {meshHud.uploadMs.toFixed(2)}</li> : null}
+          {showDiagnostics && meshDetailMode === "detailed" ? <li>Mesh Extract Avg: {meshHud.extractAvgMs.toFixed(2)}</li> : null}
+          {showDiagnostics && meshDetailMode === "detailed" ? <li>Mesh Upload Avg: {meshHud.uploadAvgMs.toFixed(2)}</li> : null}
+          {showDiagnostics && meshDetailMode === "detailed" ? <li>Mesh Extract P95: {meshHud.extractP95Ms.toFixed(2)}</li> : null}
+          {showDiagnostics && meshDetailMode === "detailed" ? <li>Mesh Upload P95: {meshHud.uploadP95Ms.toFixed(2)}</li> : null}
+          {showDiagnostics && meshDetailMode === "detailed" ? (
+            <li>Active Chunk Extract Avg: {meshHud.activeChunkExtractAvgMs.toFixed(2)}</li>
+          ) : null}
+          {showDiagnostics && meshDetailMode === "detailed" ? (
+            <li>Active Chunk Upload Avg: {meshHud.activeChunkUploadAvgMs.toFixed(2)}</li>
+          ) : null}
+          {showDiagnostics && meshDetailMode === "detailed" ? <li>Mesh Tracked Chunks: {meshHud.trackedChunks}</li> : null}
+          {showDiagnostics && meshHud.workerError ? <li>Mesh Worker Error: {meshHud.workerError}</li> : null}
           <li>Grid: {CHUNK_GRID_CELLS}x{CHUNK_GRID_CELLS} cells/chunk</li>
           {atlasSummary ? (
             <li>
@@ -1475,13 +2550,35 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
         </ul>
         <ul className="combat-log">
           <li>Active Slot: {combatHud.selectedSlotLabel}</li>
+          <li>
+            Active Recipe: {selectedCraftRecipe.label} ({selectedCraftRecipe.keybind})
+          </li>
           <li>Cooldown: {combatHud.selectedCooldownMs > 0 ? `${combatHud.selectedCooldownMs}ms` : "ready"}</li>
           <li>Last Action: {combatHud.lastAction}</li>
           <li>Last Target: {combatHud.lastTarget}</li>
+          <li>Target Resolution: {combatHud.targetResolution}</li>
+        </ul>
+        <ul className="directive-history">
+          {directiveHistory.length === 0 ? (
+            <li>Directive History: none</li>
+          ) : (
+            directiveHistory
+              .slice()
+              .reverse()
+              .map((entry) => (
+                <li key={entry.id}>
+                  [{entry.tick}] {entry.text}
+                </li>
+              ))
+          )}
         </ul>
         <p className="muted">
           Drag to rotate camera. Move with W/S and swapped strafe (A=right, D=left). Use 1-5 to select slot and
-          left-click to attack or break blocks. Right-click places a block.
+          left-click to attack or break blocks. Right-click places a block. Craft flow: choose recipe with 6-9 (or
+          click recipe bar), then press R to craft. Select stash resource with N/M and amount with J/K (or use HUD
+          buttons). Hold Shift for half transfer, or Ctrl/Alt/Cmd for all. Press [ / ] for shared stash and ; /
+          &apos; for private stash transfers. Use F3 to toggle diagnostics, F4 to switch mesh detail mode, and F5 to
+          toggle debug minimap.
         </p>
       </aside>
     </section>
@@ -1524,6 +2621,124 @@ function hashToColor(payload: string): string {
   const color = new THREE.Color();
   color.setHSL(hue / 360, saturation / 100, lightness / 100);
   return `#${color.getHexString()}`;
+}
+
+function formatResourceSummary(resources: Record<string, number>): string {
+  return DEFAULT_RUNTIME_RESOURCE_IDS
+    .map((resourceId) => `${resourceId}:${resources[resourceId] ?? 0}`)
+    .join(" ");
+}
+
+function formatWorldFlags(flags: Record<string, string>): string {
+  const entries = Object.entries(flags).sort((left, right) => left[0].localeCompare(right[0]));
+  if (entries.length === 0) {
+    return "none";
+  }
+  return entries.map(([key, value]) => `${key}:${value}`).join(" ");
+}
+
+function formatSpawnHints(spawnHints: RuntimeSpawnHint[]): string {
+  if (spawnHints.length === 0) {
+    return "none";
+  }
+  return spawnHints
+    .slice(0, 3)
+    .map((hint) => `${hint.label}@${hint.chunkX},${hint.chunkZ}`)
+    .join(" | ");
+}
+
+function formatCombatRejectReason(reason: string | undefined): string {
+  switch (reason) {
+    case "target_out_of_range":
+      return "target out of range";
+    case "missing_target":
+      return "missing target";
+    case "unknown_target":
+      return "unknown target";
+    case "slot_not_equipped":
+      return "slot not equipped";
+    case "invalid_slot_kind":
+      return "invalid slot kind";
+    case "invalid_slot":
+      return "invalid slot";
+    case "insufficient_item":
+      return "insufficient item";
+    case "player_not_found":
+      return "player not found";
+    case "invalid_payload":
+      return "invalid request";
+    case undefined:
+      return "rejected";
+    default:
+      return reason;
+  }
+}
+
+function formatCraftRejectReason(reason: string | undefined): string {
+  switch (reason) {
+    case "insufficient_resources":
+      return "insufficient resources";
+    case "craft_target_slot_missing":
+      return "missing craft output slot";
+    case "invalid_recipe":
+      return "invalid recipe";
+    case "invalid_payload":
+      return "invalid request";
+    case undefined:
+      return "unknown reason";
+    default:
+      return reason;
+  }
+}
+
+function formatContainerRejectReason(reason: string | undefined): string {
+  switch (reason) {
+    case "insufficient_resources":
+      return "insufficient inventory resources";
+    case "container_insufficient_resources":
+      return "insufficient stash resources";
+    case "container_forbidden":
+      return "container access denied";
+    case "invalid_container":
+      return "invalid container";
+    case "invalid_operation":
+      return "invalid operation";
+    case "invalid_payload":
+      return "invalid request";
+    case undefined:
+      return "unknown reason";
+    default:
+      return reason;
+  }
+}
+
+function buildChunkVertexColors(positions: Float32Array, chunkMaxHeight: number): Float32Array {
+  const colors = new Float32Array(positions.length);
+  const maxHeight = Math.max(1, chunkMaxHeight);
+  for (let index = 0; index < positions.length; index += 3) {
+    const y = positions[index + 1];
+    const normalized = THREE.MathUtils.clamp(y / maxHeight, 0, 1);
+
+    let r = 0.26 + (0.2 * normalized);
+    let g = 0.42 + (0.32 * normalized);
+    let b = 0.2 + (0.08 * (1 - normalized));
+
+    if (normalized < 0.22) {
+      r = 0.46;
+      g = 0.34;
+      b = 0.22;
+    } else if (normalized > 0.78) {
+      r += 0.07;
+      g += 0.07;
+      b += 0.05;
+    }
+
+    colors[index] = r;
+    colors[index + 1] = g;
+    colors[index + 2] = b;
+  }
+
+  return colors;
 }
 
 function createEventId(): string {

@@ -1,11 +1,33 @@
 export type Gender = "female" | "male" | "nonbinary";
-export type Archetype = "tracker" | "keeper" | "scholar";
+export type CharacterClass = "warden" | "ranger" | "arcanist";
+export type CharacterOrigin = "greenhollow" | "emberridge" | "stormhaven";
+export type BodyType = "lean" | "athletic" | "sturdy";
+export type FaceStyle = "veteran" | "noble" | "wanderer";
+export type HairStyle = "braided" | "cropped" | "windswept";
+export type CameraMode = "first-person" | "third-person";
+
+export interface CharacterAppearance {
+  bodyType: BodyType;
+  faceStyle: FaceStyle;
+  hairStyle: HairStyle;
+  accentColor: string;
+}
+
+export interface WorldInstance {
+  id: string;
+  seed: string;
+  createdAt: string;
+}
 
 export interface PlayerProfile {
   id: string;
   name: string;
   gender: Gender;
-  archetype: Archetype;
+  characterClass: CharacterClass;
+  origin: CharacterOrigin;
+  appearance: CharacterAppearance;
+  preferredCamera: CameraMode;
+  world: WorldInstance;
   createdAt: string;
 }
 

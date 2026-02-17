@@ -35,6 +35,15 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
+# Local runtime/temp files
+*.pid
+*.pid.lock
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
 # -----------------------------------------------------------------------------
 # Environment files (keep templates)
 # -----------------------------------------------------------------------------
@@ -51,6 +60,9 @@ target/
 # sim-core is a library crate; lockfile is generated and should not be committed
 packages/sim-core/Cargo.lock
 
+# Generated wasm artifacts
+apps/web/public/wasm/*.wasm
+
 # -----------------------------------------------------------------------------
 # OS / editor noise
 # -----------------------------------------------------------------------------
@@ -58,3 +70,9 @@ packages/sim-core/Cargo.lock
 Thumbs.db
 .idea/
 .vscode/
+
+# -----------------------------------------------------------------------------
+# Test/report artifacts
+# -----------------------------------------------------------------------------
+playwright-report/
+test-results/

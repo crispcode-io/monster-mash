@@ -44,8 +44,9 @@ export function WorldScreen() {
           <p className="eyebrow">Field Session</p>
           <h1>{profile.name}</h1>
           <p className="muted">
-            {profile.archetype} · {profile.gender}
+            {profile.characterClass} · {profile.gender} · {profile.origin}
           </p>
+          <p className="muted">World: {profile.world.seed}</p>
         </div>
         <div className="action-row">
           <button
