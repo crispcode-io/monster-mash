@@ -20,6 +20,7 @@ type runtimeInputState struct {
 	MoveX   float64 `json:"moveX"`
 	MoveZ   float64 `json:"moveZ"`
 	Running bool    `json:"running"`
+	Jump    bool    `json:"jump"`
 }
 
 type joinRuntimeRequest struct {
@@ -114,6 +115,15 @@ type combatActionPayload struct {
 	TargetWorldZ *float64 `json:"targetWorldZ,omitempty"`
 }
 
+type interactActionPayload struct {
+	PlayerID     string   `json:"playerId"`
+	ActionID     string   `json:"actionId"`
+	TargetID     string   `json:"targetId,omitempty"`
+	TargetLabel  string   `json:"targetLabel,omitempty"`
+	TargetWorldX *float64 `json:"targetWorldX,omitempty"`
+	TargetWorldZ *float64 `json:"targetWorldZ,omitempty"`
+}
+
 type runtimeCombatResult struct {
 	ActionID            string   `json:"actionId"`
 	PlayerID            string   `json:"playerId"`
@@ -129,6 +139,18 @@ type runtimeCombatResult struct {
 	Tick                int64    `json:"tick"`
 }
 
+type runtimeInteractResult struct {
+	ActionID     string   `json:"actionId"`
+	PlayerID     string   `json:"playerId"`
+	Accepted     bool     `json:"accepted"`
+	Reason       string   `json:"reason,omitempty"`
+	TargetID     string   `json:"targetId,omitempty"`
+	TargetLabel  string   `json:"targetLabel,omitempty"`
+	TargetWorldX *float64 `json:"targetWorldX,omitempty"`
+	TargetWorldZ *float64 `json:"targetWorldZ,omitempty"`
+	Message      string   `json:"message,omitempty"`
+	Tick         int64    `json:"tick"`
+}
 type runtimeHotbarState struct {
 	PlayerID      string   `json:"playerId"`
 	SlotIDs       []string `json:"slotIds"`
@@ -141,6 +163,22 @@ type runtimeInventoryState struct {
 	PlayerID  string         `json:"playerId"`
 	Resources map[string]int `json:"resources"`
 	Tick      int64          `json:"tick"`
+}
+
+type runtimeHealthState struct {
+	PlayerID string `json:"playerId"`
+	Current  int    `json:"current"`
+	Max      int    `json:"max"`
+	Tick     int64  `json:"tick"`
+}
+
+type runtimeEntityHealthState struct {
+	TargetID           string `json:"targetId"`
+	EntityType         string `json:"entityType"`
+	Current            int    `json:"current"`
+	Max                int    `json:"max"`
+	DefeatedUntilTick  int64  `json:"defeatedUntilTick"`
+	Tick               int64  `json:"tick"`
 }
 
 type runtimeCraftResult struct {
@@ -194,6 +232,8 @@ type worldDebugState struct {
 	BlockDeltas     []runtimeBlockDelta     `json:"blockDeltas"`
 	HotbarStates    []runtimeHotbarState    `json:"hotbarStates"`
 	InventoryStates []runtimeInventoryState `json:"inventoryStates"`
+	HealthStates    []runtimeHealthState    `json:"healthStates"`
+	EntityHealth    []runtimeEntityHealthState `json:"entityHealth"`
 	ContainerStates []runtimeContainerState `json:"containerStates"`
 	WorldFlags      runtimeWorldFlagState   `json:"worldFlags"`
 	DirectiveState  runtimeDirectiveState   `json:"directiveState"`
@@ -236,6 +276,11 @@ type openclawDirectiveAck struct {
 	Tick     int64  `json:"tick"`
 }
 
+type openclawCursor struct {
+	Seq       int64
+	UpdatedAt time.Time
+}
+
 type worldEvent struct {
 	Seq      int64          `json:"seq"`
 	Tick     int64          `json:"tick"`
@@ -251,15 +296,30 @@ type worldEventFeed struct {
 
 const (
 	maxOpenClawEvents         = 512
+	maxOpenClawCursors        = 128
 	maxQueuedDirectives       = 128
+	maxDirectivesPerTick      = 10
 	defaultDirectiveTTLTicks  = 240
 	maxDirectiveTTLTicks      = 2000
 	combatReplicationRadius   = 48.0
 	snapshotReplicationRadius = 160.0
+	blockDeltaChunkRadius     = 2
 	chunkGridCells            = 16
 	worldChunkSize            = 64.0
 	defaultSpawnHintTTLTicks  = 600
 	maxSpawnHintTTLTicks      = 4000
+	terrainMaxHeight          = 8
+	npcWanderRadiusMin        = 0.6
+	npcWanderRadiusMax        = 1.8
+	npcWanderSpeedMin         = 0.02
+	npcWanderSpeedMax         = 0.06
+	npcWanderSwayMin          = 0.8
+	npcWanderSwayMax          = 1.4
+	interactionRange          = 3.4
+	defaultPlayerMaxHealth    = 10
+	entityRespawnTicks        = 600
+	npcMaxHealth              = 6
+	wildMonMaxHealth          = 8
 )
 
 type combatSlotConfig struct {
@@ -267,14 +327,16 @@ type combatSlotConfig struct {
 	cooldownTicks  int64
 	maxRange       float64
 	requiresTarget bool
+	damage         int
+	heal           int
 }
 
 var combatSlotConfigs = map[string]combatSlotConfig{
-	"slot-1-rust-blade": {kind: "melee", cooldownTicks: 12, maxRange: 3.4, requiresTarget: true},
-	"slot-2-ember-bolt": {kind: "spell", cooldownTicks: 20, maxRange: 11.5, requiresTarget: true},
-	"slot-3-frost-bind": {kind: "spell", cooldownTicks: 29, maxRange: 8.5, requiresTarget: true},
-	"slot-4-bandage":    {kind: "item", cooldownTicks: 42, maxRange: 0, requiresTarget: false},
-	"slot-5-bomb":       {kind: "item", cooldownTicks: 33, maxRange: 9.5, requiresTarget: true},
+	"slot-1-rust-blade": {kind: "melee", cooldownTicks: 12, maxRange: 3.4, requiresTarget: true, damage: 2},
+	"slot-2-ember-bolt": {kind: "spell", cooldownTicks: 20, maxRange: 11.5, requiresTarget: true, damage: 3},
+	"slot-3-frost-bind": {kind: "spell", cooldownTicks: 29, maxRange: 8.5, requiresTarget: true, damage: 2},
+	"slot-4-bandage":    {kind: "item", cooldownTicks: 42, maxRange: 0, requiresTarget: false, heal: 2},
+	"slot-5-bomb":       {kind: "item", cooldownTicks: 33, maxRange: 9.5, requiresTarget: true, damage: 4},
 }
 
 var defaultHotbarSlotIDs = []string{
@@ -385,6 +447,8 @@ type worldHub struct {
 	combatCooldownTick map[string]map[string]int64
 	hotbarStates       map[string]runtimeHotbarState
 	inventoryStates    map[string]runtimeInventoryState
+	healthStates       map[string]runtimeHealthState
+	entityHealth       map[string]runtimeEntityHealthState
 	containerStates    map[string]runtimeContainerState
 	eventSeq           int64
 	eventLog           []worldEvent
@@ -398,6 +462,11 @@ type worldHub struct {
 	tickRateHz    float64
 	walkSpeed     float64
 	runMultiplier float64
+
+	directiveBudgetTick  int64
+	directiveBudgetCount int
+
+	eventCursors map[string]openclawCursor
 }
 
 func newWorldHub() *worldHub {
@@ -409,6 +478,8 @@ func newWorldHub() *worldHub {
 		combatCooldownTick: make(map[string]map[string]int64),
 		hotbarStates:       make(map[string]runtimeHotbarState),
 		inventoryStates:    make(map[string]runtimeInventoryState),
+		healthStates:       make(map[string]runtimeHealthState),
+		entityHealth:       make(map[string]runtimeEntityHealthState),
 		containerStates:    make(map[string]runtimeContainerState),
 		eventLog:           make([]worldEvent, 0, maxOpenClawEvents),
 		worldFlags:         make(map[string]string),
@@ -417,6 +488,7 @@ func newWorldHub() *worldHub {
 		directiveQueue:     make([]openclawDirective, 0, maxQueuedDirectives),
 		directiveSeen:      make(map[string]struct{}),
 		clients:            make(map[*clientConn]struct{}),
+		eventCursors:       make(map[string]openclawCursor),
 		tickRateHz:         20,
 		walkSpeed:          6,
 		runMultiplier:      1.35,
@@ -458,6 +530,7 @@ func (h *worldHub) handleJoin(client *clientConn, join joinRuntimeRequest) {
 	client.playerIDs[join.PlayerID] = struct{}{}
 	h.ensureHotbarStateLocked(join.PlayerID)
 	h.ensureInventoryStateLocked(join.PlayerID)
+	h.ensureHealthStateLocked(join.PlayerID)
 	h.ensureContainerStateLocked(worldSharedContainerID)
 	h.ensureContainerStateLocked(playerPrivateContainerID(join.PlayerID))
 	h.recordWorldEventLocked("player_joined", join.PlayerID, map[string]any{
@@ -473,6 +546,7 @@ func (h *worldHub) handleLeave(playerID string) {
 	delete(h.combatCooldownTick, playerID)
 	delete(h.hotbarStates, playerID)
 	delete(h.inventoryStates, playerID)
+	delete(h.healthStates, playerID)
 	h.recordWorldEventLocked("player_left", playerID, nil)
 }
 
@@ -487,6 +561,7 @@ func (h *worldHub) handleInput(payload inputPayload) {
 		MoveX:   sanitizeNumber(payload.Input.MoveX),
 		MoveZ:   sanitizeNumber(payload.Input.MoveZ),
 		Running: payload.Input.Running,
+		Jump:    payload.Input.Jump,
 	}
 }
 
@@ -550,7 +625,7 @@ func (h *worldHub) applyBlockAction(payload blockActionPayload) (runtimeBlockDel
 	}, true
 }
 
-func (h *worldHub) applyCombatAction(payload combatActionPayload) runtimeCombatResult {
+func (h *worldHub) applyCombatAction(payload combatActionPayload) (runtimeCombatResult, []runtimeHealthState, []runtimeInventoryState, []worldEvent) {
 	result := runtimeCombatResult{
 		ActionID:     payload.ActionID,
 		PlayerID:     payload.PlayerID,
@@ -564,13 +639,16 @@ func (h *worldHub) applyCombatAction(payload combatActionPayload) runtimeCombatR
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	healthUpdates := make([]runtimeHealthState, 0, 2)
+	inventoryUpdates := make([]runtimeInventoryState, 0, 1)
+	worldEvents := make([]worldEvent, 0, 1)
 	result.Tick = h.tick
 
 	if payload.PlayerID == "" || payload.ActionID == "" || payload.SlotID == "" || payload.Kind == "" {
 		result.Accepted = false
 		result.Reason = "invalid_payload"
 		h.recordCombatEventLocked(result)
-		return result
+		return result, healthUpdates, inventoryUpdates, worldEvents
 	}
 
 	player, ok := h.players[payload.PlayerID]
@@ -578,7 +656,7 @@ func (h *worldHub) applyCombatAction(payload combatActionPayload) runtimeCombatR
 		result.Accepted = false
 		result.Reason = "player_not_found"
 		h.recordCombatEventLocked(result)
-		return result
+		return result, healthUpdates, inventoryUpdates, worldEvents
 	}
 
 	slotConfig, ok := combatSlotConfigs[payload.SlotID]
@@ -586,13 +664,13 @@ func (h *worldHub) applyCombatAction(payload combatActionPayload) runtimeCombatR
 		result.Accepted = false
 		result.Reason = "invalid_slot"
 		h.recordCombatEventLocked(result)
-		return result
+		return result, healthUpdates, inventoryUpdates, worldEvents
 	}
 	if payload.Kind != slotConfig.kind {
 		result.Accepted = false
 		result.Reason = "invalid_slot_kind"
 		h.recordCombatEventLocked(result)
-		return result
+		return result, healthUpdates, inventoryUpdates, worldEvents
 	}
 	hotbarState := h.ensureHotbarStateLocked(payload.PlayerID)
 	slotIndex := hotbarSlotIndex(hotbarState, payload.SlotID)
@@ -600,7 +678,7 @@ func (h *worldHub) applyCombatAction(payload combatActionPayload) runtimeCombatR
 		result.Accepted = false
 		result.Reason = "slot_not_equipped"
 		h.recordCombatEventLocked(result)
-		return result
+		return result, healthUpdates, inventoryUpdates, worldEvents
 	}
 	if slotConfig.requiresTarget {
 		resolvedX, resolvedZ, resolvedByServer := h.resolveTargetCoordinatesLocked(payload.PlayerID, result.TargetID)
@@ -618,12 +696,12 @@ func (h *worldHub) applyCombatAction(payload combatActionPayload) runtimeCombatR
 			result.Accepted = false
 			result.Reason = "unknown_target"
 			h.recordCombatEventLocked(result)
-			return result
+			return result, healthUpdates, inventoryUpdates, worldEvents
 		default:
 			result.Accepted = false
 			result.Reason = "missing_target"
 			h.recordCombatEventLocked(result)
-			return result
+			return result, healthUpdates, inventoryUpdates, worldEvents
 		}
 		distance := math.Hypot(
 			sanitizeNumber(*result.TargetWorldX)-player.X,
@@ -633,7 +711,17 @@ func (h *worldHub) applyCombatAction(payload combatActionPayload) runtimeCombatR
 			result.Accepted = false
 			result.Reason = "target_out_of_range"
 			h.recordCombatEventLocked(result)
-			return result
+			return result, healthUpdates, inventoryUpdates, worldEvents
+		}
+		if result.TargetID != "" {
+			if _, ok := h.players[result.TargetID]; !ok {
+				if isNonPlayerTargetID(result.TargetID) && !h.isEntityAvailableLocked(result.TargetID) {
+					result.Accepted = false
+					result.Reason = "target_defeated"
+					h.recordCombatEventLocked(result)
+					return result, healthUpdates, inventoryUpdates, worldEvents
+				}
+			}
 		}
 	}
 
@@ -650,7 +738,7 @@ func (h *worldHub) applyCombatAction(payload combatActionPayload) runtimeCombatR
 		remainingTicks := readyAt - h.tick
 		result.CooldownRemainingMs = int(float64(remainingTicks) * (1000.0 / h.tickRateHz))
 		h.recordCombatEventLocked(result)
-		return result
+		return result, healthUpdates, inventoryUpdates, worldEvents
 	}
 
 	if slotConfig.kind == "item" {
@@ -659,7 +747,7 @@ func (h *worldHub) applyCombatAction(payload combatActionPayload) runtimeCombatR
 			result.Accepted = false
 			result.Reason = "insufficient_item"
 			h.recordCombatEventLocked(result)
-			return result
+			return result, healthUpdates, inventoryUpdates, worldEvents
 		}
 		hotbarState.StackCounts[slotIndex] = remaining - 1
 		hotbarState.Tick = h.tick
@@ -668,7 +756,159 @@ func (h *worldHub) applyCombatAction(payload combatActionPayload) runtimeCombatR
 
 	playerCooldowns[payload.SlotID] = h.tick + slotConfig.cooldownTicks
 	result.Accepted = true
+	healthUpdates, inventoryUpdates, worldEvents = h.applyCombatEffectsLocked(result, slotConfig)
 	h.recordCombatEventLocked(result)
+	return result, healthUpdates, inventoryUpdates, worldEvents
+}
+
+func (h *worldHub) applyCombatEffectsLocked(result runtimeCombatResult, slotConfig combatSlotConfig) ([]runtimeHealthState, []runtimeInventoryState, []worldEvent) {
+	updates := make([]runtimeHealthState, 0, 2)
+	inventoryUpdates := make([]runtimeInventoryState, 0, 1)
+	worldEvents := make([]worldEvent, 0, 1)
+	if slotConfig.heal > 0 {
+		state := h.ensureHealthStateLocked(result.PlayerID)
+		next := state.Current + slotConfig.heal
+		if next > state.Max {
+			next = state.Max
+		}
+		if next != state.Current {
+			state.Current = next
+			state.Tick = h.tick
+			h.healthStates[result.PlayerID] = cloneHealthState(state)
+			updates = append(updates, cloneHealthState(state))
+			h.recordWorldEventLocked("player_healed", result.PlayerID, map[string]any{
+				"delta":   slotConfig.heal,
+				"current": state.Current,
+				"max":     state.Max,
+			})
+		}
+	}
+
+	if slotConfig.damage > 0 && result.TargetID != "" {
+		if _, ok := h.players[result.TargetID]; ok {
+			state := h.ensureHealthStateLocked(result.TargetID)
+			next := state.Current - slotConfig.damage
+			if next < 0 {
+				next = 0
+			}
+			if next != state.Current {
+				state.Current = next
+				state.Tick = h.tick
+				h.healthStates[result.TargetID] = cloneHealthState(state)
+				updates = append(updates, cloneHealthState(state))
+				h.recordWorldEventLocked("player_damaged", result.TargetID, map[string]any{
+					"delta":   -slotConfig.damage,
+					"current": state.Current,
+					"max":     state.Max,
+					"source":  result.PlayerID,
+					"slotId":  result.SlotID,
+				})
+			}
+		} else {
+			entityState, ok, defeatedNow := h.applyEntityDamageLocked(result.TargetID, slotConfig.damage)
+			if ok {
+				h.recordWorldEventLocked("entity_damaged", result.PlayerID, map[string]any{
+					"targetId":    entityState.TargetID,
+					"entityType":  entityState.EntityType,
+					"current":     entityState.Current,
+					"max":         entityState.Max,
+					"source":      result.PlayerID,
+					"slotId":      result.SlotID,
+					"respawnTick": entityState.DefeatedUntilTick,
+				})
+				if defeatedNow {
+					loot := resolveEntityLoot(entityState.TargetID, entityState.EntityType, h.tick)
+					if inventoryState, changed := h.awardInventoryResourcesLocked(result.PlayerID, loot); changed {
+						inventoryUpdates = append(inventoryUpdates, inventoryState)
+					}
+					eventPayload := map[string]any{
+						"targetId":    entityState.TargetID,
+						"entityType":  entityState.EntityType,
+						"source":      result.PlayerID,
+						"slotId":      result.SlotID,
+						"respawnTick": entityState.DefeatedUntilTick,
+						"loot":        loot,
+					}
+					event := h.recordWorldEventLocked("entity_defeated", result.PlayerID, eventPayload)
+					worldEvents = append(worldEvents, event)
+				}
+			}
+		}
+	}
+
+	return updates, inventoryUpdates, worldEvents
+}
+
+func (h *worldHub) applyInteractAction(payload interactActionPayload) runtimeInteractResult {
+	result := runtimeInteractResult{
+		ActionID:     payload.ActionID,
+		PlayerID:     payload.PlayerID,
+		TargetID:     strings.TrimSpace(payload.TargetID),
+		TargetLabel:  strings.TrimSpace(payload.TargetLabel),
+		TargetWorldX: payload.TargetWorldX,
+		TargetWorldZ: payload.TargetWorldZ,
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	result.Tick = h.tick
+
+	if payload.PlayerID == "" || payload.ActionID == "" {
+		result.Accepted = false
+		result.Reason = "invalid_payload"
+		return result
+	}
+
+	player, ok := h.players[payload.PlayerID]
+	if !ok {
+		result.Accepted = false
+		result.Reason = "player_not_found"
+		return result
+	}
+
+	if result.TargetID != "" {
+		resolvedX, resolvedZ, resolvedByServer := h.resolveTargetCoordinatesLocked(payload.PlayerID, result.TargetID)
+		if resolvedByServer {
+			result.TargetWorldX = makeFloat64Ptr(resolvedX)
+			result.TargetWorldZ = makeFloat64Ptr(resolvedZ)
+			if result.TargetLabel == "" {
+				result.TargetLabel = result.TargetID
+			}
+		} else if payload.TargetWorldX == nil || payload.TargetWorldZ == nil {
+			result.Accepted = false
+			result.Reason = "unknown_target"
+			return result
+		}
+	} else if payload.TargetWorldX == nil || payload.TargetWorldZ == nil {
+		result.Accepted = false
+		result.Reason = "missing_target"
+		return result
+	}
+
+	if result.TargetWorldX == nil || result.TargetWorldZ == nil {
+		result.Accepted = false
+		result.Reason = "missing_target"
+		return result
+	}
+
+	distance := math.Hypot(sanitizeNumber(*result.TargetWorldX)-player.X, sanitizeNumber(*result.TargetWorldZ)-player.Z)
+	if distance > interactionRange {
+		result.Accepted = false
+		result.Reason = "target_out_of_range"
+		return result
+	}
+
+	result.Accepted = true
+	if result.TargetLabel != "" {
+		result.Message = result.TargetLabel + " acknowledges you."
+	} else {
+		result.Message = "Interaction accepted."
+	}
+	h.recordWorldEventLocked("interaction", payload.PlayerID, map[string]any{
+		"targetId":    result.TargetID,
+		"targetLabel": result.TargetLabel,
+		"distance":    distance,
+	})
 	return result
 }
 
@@ -680,7 +920,7 @@ func (h *worldHub) resolveTargetCoordinatesLocked(actorPlayerID string, targetID
 	if ok {
 		return target.X, target.Z, true
 	}
-	x, z, resolved := resolveNonPlayerTargetCoordinates(targetID, h.worldSeed)
+	x, z, resolved := resolveNonPlayerTargetCoordinates(targetID, h.worldSeed, h.tick, h.tickRateHz)
 	if !resolved {
 		return 0, 0, false
 	}
@@ -796,6 +1036,17 @@ func (h *worldHub) inventoryStateForPlayer(playerID string) (runtimeInventorySta
 	return cloneInventoryState(state), true
 }
 
+func (h *worldHub) healthStateForPlayer(playerID string) (runtimeHealthState, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if _, ok := h.players[playerID]; !ok {
+		return runtimeHealthState{}, false
+	}
+	state := h.ensureHealthStateLocked(playerID)
+	return cloneHealthState(state), true
+}
+
 func (h *worldHub) ensureInventoryStateLocked(playerID string) runtimeInventoryState {
 	state, ok := h.inventoryStates[playerID]
 	if !ok {
@@ -811,6 +1062,119 @@ func (h *worldHub) ensureInventoryStateLocked(playerID string) runtimeInventoryS
 	state.Tick = h.tick
 	h.inventoryStates[playerID] = cloneInventoryState(state)
 	return state
+}
+
+func (h *worldHub) ensureHealthStateLocked(playerID string) runtimeHealthState {
+	state, ok := h.healthStates[playerID]
+	if !ok {
+		state = runtimeHealthState{
+			PlayerID: playerID,
+			Current:  defaultPlayerMaxHealth,
+			Max:      defaultPlayerMaxHealth,
+			Tick:     h.tick,
+		}
+		h.healthStates[playerID] = cloneHealthState(state)
+		return state
+	}
+	if state.Max <= 0 {
+		state.Max = defaultPlayerMaxHealth
+	}
+	if state.Current > state.Max {
+		state.Current = state.Max
+	}
+	if state.Current < 0 {
+		state.Current = 0
+	}
+	state.Tick = h.tick
+	h.healthStates[playerID] = cloneHealthState(state)
+	return state
+}
+
+func resolveEntityBaseHealth(entityType string) (int, bool) {
+	switch entityType {
+	case "npc":
+		return npcMaxHealth, true
+	case "wild-mon":
+		return wildMonMaxHealth, true
+	default:
+		return 0, false
+	}
+}
+
+func (h *worldHub) ensureEntityHealthLocked(targetID string) (runtimeEntityHealthState, bool) {
+	_, _, entityType, _, ok := parseTargetID(targetID)
+	if !ok {
+		return runtimeEntityHealthState{}, false
+	}
+	baseHealth, ok := resolveEntityBaseHealth(entityType)
+	if !ok {
+		return runtimeEntityHealthState{}, false
+	}
+	state, ok := h.entityHealth[targetID]
+	if !ok {
+		state = runtimeEntityHealthState{
+			TargetID:          targetID,
+			EntityType:        entityType,
+			Current:           baseHealth,
+			Max:               baseHealth,
+			DefeatedUntilTick: 0,
+			Tick:              h.tick,
+		}
+		h.entityHealth[targetID] = state
+		return state, true
+	}
+	if state.Max <= 0 {
+		state.Max = baseHealth
+	}
+	if state.DefeatedUntilTick > 0 && h.tick >= state.DefeatedUntilTick {
+		state.Current = state.Max
+		state.DefeatedUntilTick = 0
+	}
+	if state.Current > state.Max {
+		state.Current = state.Max
+	}
+	if state.Current < 0 {
+		state.Current = 0
+	}
+	state.Tick = h.tick
+	h.entityHealth[targetID] = state
+	return state, true
+}
+
+func (h *worldHub) isEntityAvailableLocked(targetID string) bool {
+	state, ok := h.ensureEntityHealthLocked(targetID)
+	if !ok {
+		return false
+	}
+	if state.DefeatedUntilTick > h.tick && state.Current <= 0 {
+		return false
+	}
+	return true
+}
+
+func (h *worldHub) applyEntityDamageLocked(targetID string, damage int) (runtimeEntityHealthState, bool, bool) {
+	if damage <= 0 {
+		return runtimeEntityHealthState{}, false, false
+	}
+	state, ok := h.ensureEntityHealthLocked(targetID)
+	if !ok {
+		return runtimeEntityHealthState{}, false, false
+	}
+	if state.DefeatedUntilTick > h.tick && state.Current <= 0 {
+		return state, true, false
+	}
+	next := state.Current - damage
+	if next < 0 {
+		next = 0
+	}
+	defeatedNow := state.Current > 0 && next == 0
+	state.Current = next
+	state.Tick = h.tick
+	if defeatedNow {
+		state.DefeatedUntilTick = h.tick + entityRespawnTicks
+	}
+	h.entityHealth[targetID] = state
+	return state, true, defeatedNow
 }
 
 func (h *worldHub) awardInventoryResource(playerID string, resource string, amount int) (runtimeInventoryState, bool) {
@@ -856,6 +1220,27 @@ func (h *worldHub) awardInventoryResources(playerID string, grants map[string]in
 			"amount":   amount,
 			"total":    state.Resources[resource],
 		})
+	}
+	if !changed {
+		return runtimeInventoryState{}, false
+	}
+	state.Tick = h.tick
+	h.inventoryStates[playerID] = cloneInventoryState(state)
+	return cloneInventoryState(state), true
+}
+
+func (h *worldHub) awardInventoryResourcesLocked(playerID string, grants map[string]int) (runtimeInventoryState, bool) {
+	if _, ok := h.players[playerID]; !ok {
+		return runtimeInventoryState{}, false
+	}
+	state := h.ensureInventoryStateLocked(playerID)
+	changed := false
+	for resource, amount := range grants {
+		if resource == "" || amount <= 0 {
+			continue
+		}
+		state.Resources[resource] = state.Resources[resource] + amount
+		changed = true
 	}
 	if !changed {
 		return runtimeInventoryState{}, false
@@ -962,6 +1347,15 @@ func cloneInventoryState(state runtimeInventoryState) runtimeInventoryState {
 		PlayerID:  state.PlayerID,
 		Resources: resources,
 		Tick:      state.Tick,
+	}
+}
+
+func cloneHealthState(state runtimeHealthState) runtimeHealthState {
+	return runtimeHealthState{
+		PlayerID: state.PlayerID,
+		Current:  state.Current,
+		Max:      state.Max,
+		Tick:     state.Tick,
 	}
 }
 
@@ -1186,7 +1580,7 @@ func (h *worldHub) recordContainerEventLocked(result runtimeContainerActionResul
 	h.recordWorldEventLocked(eventType, result.PlayerID, payload)
 }
 
-func (h *worldHub) recordWorldEventLocked(eventType string, playerID string, payload map[string]any) {
+func (h *worldHub) recordWorldEventLocked(eventType string, playerID string, payload map[string]any) worldEvent {
 	h.eventSeq++
 	event := worldEvent{
 		Seq:      h.eventSeq,
@@ -1199,6 +1593,7 @@ func (h *worldHub) recordWorldEventLocked(eventType string, playerID string, pay
 	if len(h.eventLog) > maxOpenClawEvents {
 		h.eventLog = h.eventLog[len(h.eventLog)-maxOpenClawEvents:]
 	}
+	return event
 }
 
 func (h *worldHub) ingestDirective(request openclawDirectiveRequest) openclawDirectiveAck {
@@ -1228,6 +1623,14 @@ func (h *worldHub) ingestDirective(request openclawDirectiveRequest) openclawDir
 		ack.Reason = "duplicate_ignored"
 		return ack
 	}
+	if h.directiveBudgetTick != h.tick {
+		h.directiveBudgetTick = h.tick
+		h.directiveBudgetCount = 0
+	}
+	if h.directiveBudgetCount >= maxDirectivesPerTick {
+		ack.Reason = "directive_rate_limited"
+		return ack
+	}
 	if len(h.directiveQueue) >= maxQueuedDirectives {
 		ack.Reason = "directive_queue_full"
 		return ack
@@ -1252,6 +1655,7 @@ func (h *worldHub) ingestDirective(request openclawDirectiveRequest) openclawDir
 
 	h.directiveSeen[directive.DirectiveID] = struct{}{}
 	h.directiveQueue = append(h.directiveQueue, directive)
+	h.directiveBudgetCount++
 	ack.Accepted = true
 	ack.Queued = len(h.directiveQueue)
 	h.recordWorldEventLocked("directive_queued", "openclaw", map[string]any{
@@ -1276,6 +1680,66 @@ func (h *worldHub) listWorldEventsSince(seq int64) worldEventFeed {
 	return worldEventFeed{
 		Events: events,
 		Next:   h.eventSeq + 1,
+	}
+}
+
+func (h *worldHub) listWorldEventsForCursor(seq int64, cursor string, limit int) worldEventFeed {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if cursor != "" && seq == 0 {
+		if entry, ok := h.eventCursors[cursor]; ok {
+			seq = entry.Seq
+		}
+	}
+
+	events := make([]worldEvent, 0, len(h.eventLog))
+	for _, event := range h.eventLog {
+		if event.Seq > seq {
+			events = append(events, event)
+		}
+	}
+
+	if limit > 0 && len(events) > limit {
+		events = events[:limit]
+	}
+
+	if cursor != "" {
+		nextSeq := seq
+		if len(events) > 0 {
+			nextSeq = events[len(events)-1].Seq
+		}
+		h.eventCursors[cursor] = openclawCursor{
+			Seq:       nextSeq,
+			UpdatedAt: time.Now(),
+		}
+		h.pruneEventCursorsLocked()
+	}
+
+	return worldEventFeed{
+		Events: events,
+		Next:   h.eventSeq + 1,
+	}
+}
+
+func (h *worldHub) pruneEventCursorsLocked() {
+	if len(h.eventCursors) <= maxOpenClawCursors {
+		return
+	}
+	type cursorEntry struct {
+		id string
+		at time.Time
+	}
+	entries := make([]cursorEntry, 0, len(h.eventCursors))
+	for id, entry := range h.eventCursors {
+		entries = append(entries, cursorEntry{id: id, at: entry.UpdatedAt})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].at.Before(entries[j].at)
+	})
+	for len(entries) > maxOpenClawCursors {
+		delete(h.eventCursors, entries[0].id)
+		entries = entries[1:]
 	}
 }
 
@@ -1613,6 +2077,40 @@ func (h *worldHub) exportState() worldDebugState {
 		})
 	}
 
+	healthPlayerIDs := make([]string, 0, len(h.healthStates))
+	for playerID := range h.healthStates {
+		healthPlayerIDs = append(healthPlayerIDs, playerID)
+	}
+	sort.Strings(healthPlayerIDs)
+	healthStates := make([]runtimeHealthState, 0, len(healthPlayerIDs))
+	for _, playerID := range healthPlayerIDs {
+		state := h.healthStates[playerID]
+		healthStates = append(healthStates, runtimeHealthState{
+			PlayerID: state.PlayerID,
+			Current:  state.Current,
+			Max:      state.Max,
+			Tick:     state.Tick,
+		})
+	}
+
+	entityHealthIDs := make([]string, 0, len(h.entityHealth))
+	for targetID := range h.entityHealth {
+		entityHealthIDs = append(entityHealthIDs, targetID)
+	}
+	sort.Strings(entityHealthIDs)
+	entityHealth := make([]runtimeEntityHealthState, 0, len(entityHealthIDs))
+	for _, targetID := range entityHealthIDs {
+		state := h.entityHealth[targetID]
+		entityHealth = append(entityHealth, runtimeEntityHealthState{
+			TargetID:          state.TargetID,
+			EntityType:        state.EntityType,
+			Current:           state.Current,
+			Max:               state.Max,
+			DefeatedUntilTick: state.DefeatedUntilTick,
+			Tick:              state.Tick,
+		})
+	}
+
 	containerIDs := make([]string, 0, len(h.containerStates))
 	for containerID := range h.containerStates {
 		containerIDs = append(containerIDs, containerID)
@@ -1657,6 +2155,8 @@ func (h *worldHub) exportState() worldDebugState {
 		BlockDeltas:     blockDeltas,
 		HotbarStates:    hotbarStates,
 		InventoryStates: inventoryStates,
+		HealthStates:    healthStates,
+		EntityHealth:    entityHealth,
 		ContainerStates: containerStates,
 		WorldFlags: runtimeWorldFlagState{
 			Flags: flags,
@@ -1767,6 +2267,78 @@ func (h *worldHub) importState(state worldDebugState) (debugLoadStateAck, error)
 		}
 	}
 
+	nextHealth := make(map[string]runtimeHealthState, len(state.HealthStates))
+	for _, healthState := range state.HealthStates {
+		playerID := strings.TrimSpace(healthState.PlayerID)
+		if playerID == "" {
+			continue
+		}
+		max := healthState.Max
+		if max <= 0 {
+			max = defaultPlayerMaxHealth
+		}
+		current := healthState.Current
+		if current < 0 {
+			current = 0
+		}
+		if current > max {
+			current = max
+		}
+		tick := healthState.Tick
+		if tick < 0 {
+			tick = state.Snapshot.Tick
+		}
+		nextHealth[playerID] = runtimeHealthState{
+			PlayerID: playerID,
+			Current:  current,
+			Max:      max,
+			Tick:     tick,
+		}
+	}
+
+	nextEntityHealth := make(map[string]runtimeEntityHealthState, len(state.EntityHealth))
+	for _, entityState := range state.EntityHealth {
+		targetID := strings.TrimSpace(entityState.TargetID)
+		if targetID == "" {
+			continue
+		}
+		_, _, entityType, _, ok := parseTargetID(targetID)
+		if !ok {
+			continue
+		}
+		baseHealth, ok := resolveEntityBaseHealth(entityType)
+		if !ok {
+			continue
+		}
+		max := entityState.Max
+		if max <= 0 {
+			max = baseHealth
+		}
+		current := entityState.Current
+		if current < 0 {
+			current = 0
+		}
+		if current > max {
+			current = max
+		}
+		defeatedUntil := entityState.DefeatedUntilTick
+		if defeatedUntil < 0 {
+			defeatedUntil = 0
+		}
+		tick := entityState.Tick
+		if tick < 0 {
+			tick = state.Snapshot.Tick
+		}
+		nextEntityHealth[targetID] = runtimeEntityHealthState{
+			TargetID:          targetID,
+			EntityType:        entityType,
+			Current:           current,
+			Max:               max,
+			DefeatedUntilTick: defeatedUntil,
+			Tick:              tick,
+		}
+	}
+
 	nextContainers := make(map[string]runtimeContainerState, len(state.ContainerStates))
 	for _, containerState := range state.ContainerStates {
 		containerID := strings.TrimSpace(containerState.ContainerID)
@@ -1834,6 +2406,8 @@ func (h *worldHub) importState(state worldDebugState) (debugLoadStateAck, error)
 	h.combatCooldownTick = make(map[string]map[string]int64)
 	h.hotbarStates = nextHotbar
 	h.inventoryStates = nextInventory
+	h.healthStates = nextHealth
+	h.entityHealth = nextEntityHealth
 	h.containerStates = nextContainers
 	h.worldFlags = nextWorldFlags
 	h.storyBeats = nextStoryBeats
@@ -1847,6 +2421,7 @@ func (h *worldHub) importState(state worldDebugState) (debugLoadStateAck, error)
 	for playerID := range h.players {
 		h.ensureHotbarStateLocked(playerID)
 		h.ensureInventoryStateLocked(playerID)
+		h.ensureHealthStateLocked(playerID)
 		h.ensureContainerStateLocked(playerPrivateContainerID(playerID))
 	}
 
@@ -1970,22 +2545,71 @@ func breakResourceRoll(payload blockActionPayload) int {
 	return value % 100
 }
 
+func resolveEntityLoot(targetID string, entityType string, tick int64) map[string]int {
+	grants := map[string]int{
+		"salvage": 1,
+	}
+	rollSeed := hashStringFNV(fmt.Sprintf("%s:%d", targetID, tick))
+	roll := int(rollSeed % 100)
+
+	switch entityType {
+	case "wild-mon":
+		switch {
+		case roll < 35:
+			grants["fiber"] = grants["fiber"] + 1
+		case roll < 60:
+			grants["coal"] = grants["coal"] + 1
+		case roll < 80:
+			grants["iron_ore"] = grants["iron_ore"] + 1
+		default:
+			grants["salvage"] = grants["salvage"] + 1
+		}
+	case "npc":
+		switch {
+		case roll < 40:
+			grants["wood"] = grants["wood"] + 1
+		case roll < 70:
+			grants["fiber"] = grants["fiber"] + 1
+		default:
+			grants["salvage"] = grants["salvage"] + 1
+		}
+	}
+
+	return grants
+}
+
 type generatedChunkEntity struct {
 	entityType string
 	x          float64
 	z          float64
 }
 
-func resolveNonPlayerTargetCoordinates(targetID string, worldSeed string) (float64, float64, bool) {
+func parseTargetID(targetID string) (int, int, string, int, bool) {
 	parts := strings.Split(targetID, ":")
 	if len(parts) != 4 {
-		return 0, 0, false
+		return 0, 0, "", 0, false
 	}
 	chunkX, errX := strconv.Atoi(parts[0])
 	chunkZ, errZ := strconv.Atoi(parts[1])
 	entityType := parts[2]
 	entityIndex, errIndex := strconv.Atoi(parts[3])
 	if errX != nil || errZ != nil || errIndex != nil || entityIndex < 0 {
+		return 0, 0, "", 0, false
+	}
+	return chunkX, chunkZ, entityType, entityIndex, true
+}
+
+func isNonPlayerTargetID(targetID string) bool {
+	_, _, entityType, _, ok := parseTargetID(targetID)
+	if !ok {
+		return false
+	}
+	return entityType == "npc" || entityType == "wild-mon"
+}
+
+func resolveNonPlayerTargetCoordinates(targetID string, worldSeed string, tick int64, tickRateHz float64) (float64, float64, bool) {
+	chunkX, chunkZ, entityType, entityIndex, ok := parseTargetID(targetID)
+	if !ok {
 		return 0, 0, false
 	}
 	if entityType != "npc" && entityType != "wild-mon" {
@@ -2002,6 +2626,11 @@ func resolveNonPlayerTargetCoordinates(targetID string, worldSeed string) (float
 	}
 	worldX := (float64(chunkX) * worldChunkSize) + entity.x
 	worldZ := (float64(chunkZ) * worldChunkSize) + entity.z
+	if entityType == "npc" || entityType == "wild-mon" {
+		offsetX, offsetZ := resolveNpcWanderOffset(targetID, tick, tickRateHz)
+		worldX += offsetX
+		worldZ += offsetZ
+	}
 	return worldX, worldZ, true
 }
 
@@ -2021,8 +2650,9 @@ func generateChunkEntitiesForTargetResolution(chunkX int, chunkZ int, worldSeed 
 			localX := ((float64(cellX) + 0.5) * tileSize) - halfChunk
 			localZ := ((float64(cellZ) + 0.5) * tileSize) - halfChunk
 
-			path := isPathCell(globalCellX, globalCellZ)
-			moisture := layeredNoise(globalCellX, globalCellZ)
+			terrain := sampleTerrain(globalCellX, globalCellZ, worldSeed, terrainMaxHeight)
+			path := terrain.path
+			moisture := terrain.moisture
 
 			if path {
 				// path tile branch (no rng usage)
@@ -2140,6 +2770,180 @@ func imul32(left uint32, right uint32) uint32 {
 	return uint32(int32(left) * int32(right))
 }
 
+type terrainSample struct {
+	height      float64
+	heightIndex int
+	moisture    float64
+	ridge       float64
+	path        bool
+	pathMask    float64
+}
+
+func sampleTerrain(cellX int, cellZ int, worldSeed string, maxHeight int) terrainSample {
+	seed := hashStringFNV(worldSeed)
+	base := fbmNoise(float64(cellX)*0.06, float64(cellZ)*0.06, seed, 4, 0.5, 2.0)
+	ridge := ridgeNoise(float64(cellX)*0.11, float64(cellZ)*0.11, seed)
+	slope := fbmNoise(float64(cellX)*0.02-11, float64(cellZ)*0.02+7, seed, 2, 0.55, 2.0)
+	pathMask := resolvePathMask(cellX, cellZ)
+
+	height := 2 + ((base * 0.62) + (ridge * 0.22) + (slope * 0.16)) * float64(maxHeight)
+	height -= pathMask * 1.25
+	if height < 1 {
+		height = 1
+	}
+
+	moisture := fbmNoise(float64(cellX)*0.08+17, float64(cellZ)*0.05-9, seed, 3, 0.5, 2.0)
+	heightIndex := int(math.Floor(height))
+	if heightIndex < 1 {
+		heightIndex = 1
+	} else if heightIndex > maxHeight {
+		heightIndex = maxHeight
+	}
+
+	return terrainSample{
+		height:      height,
+		heightIndex: heightIndex,
+		moisture:    moisture,
+		ridge:       ridge,
+		path:        pathMask > 0.45,
+		pathMask:    pathMask,
+	}
+}
+
+func resolvePathMask(cellX int, cellZ int) float64 {
+	bend := math.Sin((float64(cellZ)+18)*0.09) * 2.4
+	laneCenter := 8 + bend
+	laneOffset := math.Abs(modFloat(float64(cellX), 16)-laneCenter)
+	laneMask := smoothFalloff(laneOffset, 0.4, 2.2)
+
+	crossOffset := math.Abs(modFloat(float64(cellZ), 29) - 12)
+	crossMask := smoothFalloff(crossOffset, 0.45, 2.1)
+
+	if laneMask > crossMask {
+		return laneMask
+	}
+	return crossMask
+}
+
+func smoothFalloff(distance float64, inner float64, outer float64) float64 {
+	if distance <= inner {
+		return 1
+	}
+	if distance >= outer {
+		return 0
+	}
+	t := (distance - inner) / (outer - inner)
+	return 1 - smoothStep(t)
+}
+
+func smoothStep(value float64) float64 {
+	if value < 0 {
+		return 0
+	}
+	if value > 1 {
+		return 1
+	}
+	return value * value * (3 - 2*value)
+}
+
+func modFloat(value float64, modulus float64) float64 {
+	result := math.Mod(value, modulus)
+	if result < 0 {
+		result += modulus
+	}
+	return result
+}
+
+func fbmNoise(
+	x float64,
+	z float64,
+	seed uint32,
+	octaves int,
+	persistence float64,
+	lacunarity float64,
+) float64 {
+	amplitude := 0.5
+	frequency := 1.0
+	value := 0.0
+	max := 0.0
+	for i := 0; i < octaves; i++ {
+		value += amplitude * valueNoise(x*frequency, z*frequency, seed)
+		max += amplitude
+		amplitude *= persistence
+		frequency *= lacunarity
+	}
+	if max > 0 {
+		return value / max
+	}
+	return 0
+}
+
+func ridgeNoise(x float64, z float64, seed uint32) float64 {
+	base := valueNoise(x, z, seed)
+	return 1 - math.Abs(base*2-1)
+}
+
+func valueNoise(x float64, z float64, seed uint32) float64 {
+	x0 := math.Floor(x)
+	z0 := math.Floor(z)
+	x1 := x0 + 1
+	z1 := z0 + 1
+
+	sx := smoothStep(x - x0)
+	sz := smoothStep(z - z0)
+
+	n00 := hash2d(int(x0), int(z0), seed)
+	n10 := hash2d(int(x1), int(z0), seed)
+	n01 := hash2d(int(x0), int(z1), seed)
+	n11 := hash2d(int(x1), int(z1), seed)
+
+	ix0 := lerp(n00, n10, sx)
+	ix1 := lerp(n01, n11, sx)
+	return lerp(ix0, ix1, sz)
+}
+
+func hash2d(x int, z int, seed uint32) float64 {
+	h := seed ^ imul32(uint32(int32(x)), 374761393) ^ imul32(uint32(int32(z)), 668265263)
+	h = imul32(h^(h>>13), 1274126177)
+	h ^= h >> 16
+	return float64(h) / 4294967295.0
+}
+
+func lerp(left float64, right float64, t float64) float64 {
+	return left + (right-left)*t
+}
+
+func hashStringFNV(payload string) uint32 {
+	hash := uint32(2166136261)
+	for index := 0; index < len(payload); index++ {
+		hash ^= uint32(payload[index])
+		hash *= 16777619
+	}
+	return hash
+}
+
+func resolveNpcWanderOffset(targetID string, tick int64, tickRateHz float64) (float64, float64) {
+	if tickRateHz <= 0 {
+		tickRateHz = 20
+	}
+	seedA := hashStringFNV(targetID + ":a")
+	seedB := hashStringFNV(targetID + ":b")
+	seedC := hashStringFNV(targetID + ":c")
+	unitA := float64(seedA%1000) / 1000.0
+	unitB := float64(seedB%1000) / 1000.0
+	unitC := float64(seedC%1000) / 1000.0
+
+	radius := npcWanderRadiusMin + (unitA * (npcWanderRadiusMax - npcWanderRadiusMin))
+	speedCycles := npcWanderSpeedMin + (unitB * (npcWanderSpeedMax - npcWanderSpeedMin))
+	sway := npcWanderSwayMin + (unitC * (npcWanderSwayMax - npcWanderSwayMin))
+	phaseA := unitA * math.Pi * 2
+	phaseB := unitC * math.Pi * 2
+
+	seconds := float64(tick) / tickRateHz
+	angle := seconds * speedCycles * math.Pi * 2
+	return math.Cos(angle+phaseA) * radius, math.Sin(angle*sway+phaseB) * radius * 0.7
+}
+
 func (h *worldHub) broadcast(envelope serverEnvelope) {
 	h.mu.Lock()
 	clients := make([]*clientConn, 0, len(h.clients))
@@ -2184,6 +2988,17 @@ func (h *worldHub) broadcastCombatResult(result runtimeCombatResult) {
 	}
 }
 
+func (h *worldHub) broadcastBlockDelta(delta runtimeBlockDelta) {
+	recipients := h.selectBlockDeltaRecipients(delta.ChunkX, delta.ChunkZ, blockDeltaChunkRadius)
+	envelope := serverEnvelope{
+		Type:    "block_delta",
+		Payload: delta,
+	}
+	for _, client := range recipients {
+		h.sendToClient(client, envelope)
+	}
+}
+
 func (h *worldHub) selectCombatRecipients(playerID string, radius float64) []*clientConn {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -2205,6 +3020,35 @@ func (h *worldHub) selectCombatRecipients(playerID string, radius float64) []*cl
 				continue
 			}
 			if math.Hypot(player.X-actor.X, player.Z-actor.Z) <= radius {
+				recipients[client] = struct{}{}
+				break
+			}
+		}
+	}
+
+	result := make([]*clientConn, 0, len(recipients))
+	for client := range recipients {
+		result = append(result, client)
+	}
+	return result
+}
+
+func (h *worldHub) selectBlockDeltaRecipients(chunkX int, chunkZ int, radius int) []*clientConn {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	recipients := make(map[*clientConn]struct{}, len(h.clients))
+
+	for client := range h.clients {
+		for clientPlayerID := range client.playerIDs {
+			player, ok := h.players[clientPlayerID]
+			if !ok {
+				continue
+			}
+			playerChunkX := int(math.Floor(player.X / worldChunkSize))
+			playerChunkZ := int(math.Floor(player.Z / worldChunkSize))
+			if math.Abs(float64(playerChunkX-chunkX)) <= float64(radius) &&
+				math.Abs(float64(playerChunkZ-chunkZ)) <= float64(radius) {
 				recipients[client] = struct{}{}
 				break
 			}
@@ -2318,6 +3162,12 @@ func buildWSHandler(hub *worldHub) http.HandlerFunc {
 							Payload: inventoryState,
 						})
 					}
+					if healthState, ok := hub.healthStateForPlayer(join.PlayerID); ok {
+						hub.sendToClient(client, serverEnvelope{
+							Type:    "health_state",
+							Payload: healthState,
+						})
+					}
 					if containerState, ok := hub.containerState(worldSharedContainerID); ok {
 						hub.sendToClient(client, serverEnvelope{
 							Type:    "container_state",
@@ -2353,10 +3203,7 @@ func buildWSHandler(hub *worldHub) http.HandlerFunc {
 				var action blockActionPayload
 				if json.Unmarshal(envelope.Payload, &action) == nil {
 					if delta, ok := hub.applyBlockAction(action); ok {
-						hub.broadcast(serverEnvelope{
-							Type:    "block_delta",
-							Payload: delta,
-						})
+						hub.broadcastBlockDelta(delta)
 						if action.Action == "break" {
 							if inventoryState, changed := hub.awardInventoryResources(action.PlayerID, breakResourceGrants(action)); changed {
 								hub.sendToPlayerOwnedRecipients(inventoryState.PlayerID, serverEnvelope{
@@ -2370,8 +3217,31 @@ func buildWSHandler(hub *worldHub) http.HandlerFunc {
 			case "combat_action":
 				var action combatActionPayload
 				if json.Unmarshal(envelope.Payload, &action) == nil {
-					result := hub.applyCombatAction(action)
+					result, healthUpdates, inventoryUpdates, worldEvents := hub.applyCombatAction(action)
 					hub.broadcastCombatResult(result)
+					for _, state := range healthUpdates {
+						hub.sendToPlayerOwnedRecipients(state.PlayerID, serverEnvelope{
+							Type:    "health_state",
+							Payload: state,
+						})
+					}
+					for _, state := range inventoryUpdates {
+						hub.sendToPlayerOwnedRecipients(state.PlayerID, serverEnvelope{
+							Type:    "inventory_state",
+							Payload: state,
+						})
+					}
+					if len(worldEvents) > 0 {
+						recipients := hub.selectCombatRecipients(result.PlayerID, combatReplicationRadius)
+						for _, event := range worldEvents {
+							for _, client := range recipients {
+								hub.sendToClient(client, serverEnvelope{
+									Type:    "world_event",
+									Payload: event,
+								})
+							}
+						}
+					}
 					if result.Accepted && action.Kind == "item" {
 						if state, ok := hub.hotbarStateForPlayer(action.PlayerID); ok {
 							hub.sendToPlayerOwnedRecipients(action.PlayerID, serverEnvelope{
@@ -2380,6 +3250,15 @@ func buildWSHandler(hub *worldHub) http.HandlerFunc {
 							})
 						}
 					}
+				}
+			case "interact_action":
+				var action interactActionPayload
+				if json.Unmarshal(envelope.Payload, &action) == nil {
+					result := hub.applyInteractAction(action)
+					hub.sendToPlayerOwnedRecipients(action.PlayerID, serverEnvelope{
+						Type:    "interact_result",
+						Payload: result,
+					})
 				}
 			case "hotbar_select":
 				var action hotbarSelectPayload
@@ -2523,7 +3402,22 @@ func buildEventFeedHandler(hub *worldHub) http.HandlerFunc {
 			since = parsed
 		}
 
-		feed := hub.listWorldEventsSince(since)
+		limit := 0
+		rawLimit := request.URL.Query().Get("limit")
+		if rawLimit != "" {
+			parsed, err := strconv.Atoi(rawLimit)
+			if err != nil || parsed < 1 || parsed > maxOpenClawEvents {
+				writer.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(writer).Encode(map[string]string{
+					"error": "invalid_limit",
+				})
+				return
+			}
+			limit = parsed
+		}
+
+		cursor := strings.TrimSpace(request.URL.Query().Get("cursor"))
+		feed := hub.listWorldEventsForCursor(since, cursor, limit)
 		writer.Header().Set("Content-Type", "application/json")
 		writer.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(writer).Encode(feed)

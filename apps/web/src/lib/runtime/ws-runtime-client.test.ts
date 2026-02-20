@@ -6,8 +6,10 @@ import type {
   RuntimeContainerState,
   RuntimeCraftResult,
   RuntimeDirectiveState,
+  RuntimeHealthState,
   RuntimeInventoryState,
   RuntimeHotbarState,
+  RuntimeWorldEvent,
   RuntimeWorldFlagState,
 } from "@/lib/runtime/protocol";
 import { WsRuntimeClient, wsRuntimeClientTestUtils } from "@/lib/runtime/ws-runtime-client";
@@ -162,6 +164,86 @@ describe("WsRuntimeClient", () => {
         x: 3,
         y: 4,
         z: 5,
+      },
+    ]);
+
+    unsubscribe();
+    client.dispose();
+  });
+
+  it("forwards health state envelopes", () => {
+    const client = new WsRuntimeClient({
+      worldSeed: "seed-a",
+      url: "ws://localhost:8787/ws",
+    });
+    const socket = FakeWebSocket.instances[0];
+    const states: RuntimeHealthState[] = [];
+
+    const unsubscribe = client.subscribeHealthStates((state) => {
+      states.push(state);
+    });
+
+    socket?.emitMessage(
+      JSON.stringify({
+        type: "health_state",
+        payload: {
+          playerId: "player-1",
+          current: 7,
+          max: 10,
+          tick: 12,
+        },
+      }),
+    );
+
+    expect(states).toEqual([
+      {
+        playerId: "player-1",
+        current: 7,
+        max: 10,
+        tick: 12,
+      },
+    ]);
+
+    unsubscribe();
+    client.dispose();
+  });
+
+  it("forwards world event envelopes", () => {
+    const client = new WsRuntimeClient({
+      worldSeed: "seed-a",
+      url: "ws://localhost:8787/ws",
+    });
+    const socket = FakeWebSocket.instances[0];
+    const events: RuntimeWorldEvent[] = [];
+
+    const unsubscribe = client.subscribeWorldEvents((event) => {
+      events.push(event);
+    });
+
+    socket?.emitMessage(
+      JSON.stringify({
+        type: "world_event",
+        payload: {
+          seq: 42,
+          tick: 18,
+          type: "entity_defeated",
+          playerId: "player-1",
+          payload: {
+            targetId: "0:0:npc:2",
+          },
+        },
+      }),
+    );
+
+    expect(events).toEqual([
+      {
+        seq: 42,
+        tick: 18,
+        type: "entity_defeated",
+        playerId: "player-1",
+        payload: {
+          targetId: "0:0:npc:2",
+        },
       },
     ]);
 
@@ -566,6 +648,7 @@ describe("WsRuntimeClient", () => {
       moveX: 1,
       moveZ: 0,
       running: true,
+      jump: false,
     });
 
     expect(firstSocket?.sent).toHaveLength(2);

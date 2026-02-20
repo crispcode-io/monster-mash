@@ -7,3 +7,4 @@ export * from "@/lib/runtime/authoritative-sim";
 export * from "@/lib/runtime/local-runtime-client";
 export * from "@/lib/runtime/ws-runtime-client";
 export * from "@/lib/runtime/runtime-client-factory";
+export * from "@/lib/runtime/animation-event-graph";

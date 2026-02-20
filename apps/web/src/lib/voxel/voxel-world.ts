@@ -1,4 +1,5 @@
 import { WORLD_CONFIG } from "@/lib/game-contracts";
+import { sampleTerrain } from "@/lib/world/terrain-sampler";
 
 export type VoxelBlockType = "grass" | "dirt" | "stone" | "path" | "wood";
 
@@ -67,19 +68,18 @@ export function createVoxelChunkData(
     for (let z = 0; z < gridSize; z += 1) {
       const worldX = baseGlobalX + x;
       const worldZ = baseGlobalZ + z;
-      const noise = layeredNoise(worldX, worldZ, worldSeed);
-      const ridge = ridgeNoise(worldX, worldZ, worldSeed);
-      const height = 2 + Math.floor((noise * 0.72 + ridge * 0.28) * maxHeight);
-      const path = isPathCell(worldX, worldZ);
+      const terrain = sampleTerrain(worldX, worldZ, worldSeed, maxHeight);
+      const heightIndex = terrain.heightIndex;
+      const path = terrain.path;
 
       blocks.set(blockKey(x, 0, z), "stone");
-      if (height > 2) {
-        blocks.set(blockKey(x, Math.floor(height * 0.5), z), "stone");
+      if (heightIndex > 2) {
+        blocks.set(blockKey(x, Math.floor(heightIndex * 0.5), z), "stone");
       }
-      if (height > 1) {
-        blocks.set(blockKey(x, height - 1, z), path ? "dirt" : "dirt");
+      if (heightIndex > 1) {
+        blocks.set(blockKey(x, heightIndex - 1, z), "dirt");
       }
-      blocks.set(blockKey(x, height, z), path ? "path" : "grass");
+      blocks.set(blockKey(x, heightIndex, z), path ? "path" : "grass");
     }
   }
 
@@ -264,36 +264,6 @@ export function blockTypeColor(type: VoxelBlockType): string {
     return "#b9a87a";
   }
   return "#7e5f3f";
-}
-
-function isPathCell(globalX: number, globalZ: number): boolean {
-  const bend = Math.sin((globalZ + 17) * 0.08) * 2.1;
-  const laneCenter = 12 + bend;
-  const mainPath = Math.abs((globalX % 33) - laneCenter) <= 0.8;
-  const crossRoad = Math.abs((globalZ % 41) - 19) <= 0.8;
-  return mainPath || crossRoad;
-}
-
-function layeredNoise(x: number, z: number, seed: string): number {
-  const seedN = seedHash(seed);
-  const coarse = Math.sin((x + seedN) * 0.18 + (z - seedN) * 0.11) * 0.5 + 0.5;
-  const detail = Math.sin((x - seedN) * 0.59 - (z + seedN) * 0.37) * 0.5 + 0.5;
-  return (coarse * 0.68) + (detail * 0.32);
-}
-
-function ridgeNoise(x: number, z: number, seed: string): number {
-  const seedN = seedHash(seed) * 0.5;
-  const ridge = Math.abs(Math.sin((x + seedN) * 0.046) * Math.cos((z - seedN) * 0.053));
-  return ridge;
-}
-
-function seedHash(seed: string): number {
-  let hash = 2166136261;
-  for (let index = 0; index < seed.length; index += 1) {
-    hash ^= seed.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0) % 1024;
 }
 
 function dominantAxisNormal(input: VoxelPoint3): VoxelBlockPosition {

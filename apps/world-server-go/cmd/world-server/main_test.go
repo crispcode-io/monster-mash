@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -57,7 +58,7 @@ func TestApplyCombatActionEnforcesCooldownBySlot(t *testing.T) {
 		StartZ:    0,
 	})
 
-	first := hub.applyCombatAction(combatActionPayload{
+	first, _, _, _ := hub.applyCombatAction(combatActionPayload{
 		PlayerID:     "p1",
 		ActionID:     "a-1",
 		SlotID:       "slot-2-ember-bolt",
@@ -69,7 +70,7 @@ func TestApplyCombatActionEnforcesCooldownBySlot(t *testing.T) {
 		t.Fatalf("expected first action accepted, got %#v", first)
 	}
 
-	second := hub.applyCombatAction(combatActionPayload{
+	second, _, _, _ := hub.applyCombatAction(combatActionPayload{
 		PlayerID:     "p1",
 		ActionID:     "a-2",
 		SlotID:       "slot-2-ember-bolt",
@@ -91,7 +92,7 @@ func TestApplyCombatActionEnforcesCooldownBySlot(t *testing.T) {
 		hub.advanceOneTick()
 	}
 
-	third := hub.applyCombatAction(combatActionPayload{
+	third, _, _, _ := hub.applyCombatAction(combatActionPayload{
 		PlayerID:     "p1",
 		ActionID:     "a-3",
 		SlotID:       "slot-2-ember-bolt",
@@ -107,7 +108,7 @@ func TestApplyCombatActionEnforcesCooldownBySlot(t *testing.T) {
 func TestApplyCombatActionRejectsUnknownPlayerAndInvalidSlot(t *testing.T) {
 	hub := newWorldHub()
 
-	unknownPlayer := hub.applyCombatAction(combatActionPayload{
+	unknownPlayer, _, _, _ := hub.applyCombatAction(combatActionPayload{
 		PlayerID:     "missing",
 		ActionID:     "a-1",
 		SlotID:       "slot-1-rust-blade",
@@ -127,7 +128,7 @@ func TestApplyCombatActionRejectsUnknownPlayerAndInvalidSlot(t *testing.T) {
 		StartZ:    0,
 	})
 
-	invalidSlot := hub.applyCombatAction(combatActionPayload{
+	invalidSlot, _, _, _ := hub.applyCombatAction(combatActionPayload{
 		PlayerID: "p2",
 		ActionID: "a-2",
 		SlotID:   "slot-invalid",
@@ -135,6 +136,63 @@ func TestApplyCombatActionRejectsUnknownPlayerAndInvalidSlot(t *testing.T) {
 	})
 	if invalidSlot.Accepted || invalidSlot.Reason != "invalid_slot" {
 		t.Fatalf("expected invalid_slot, got %#v", invalidSlot)
+	}
+}
+
+func TestCombatAppliesHealthDamageAndHeal(t *testing.T) {
+	hub := newWorldHub()
+	client := &clientConn{playerIDs: map[string]struct{}{}}
+	hub.handleJoin(client, joinRuntimeRequest{
+		WorldSeed: "seed-health",
+		PlayerID:  "attacker",
+		StartX:    0,
+		StartZ:    0,
+	})
+	hub.handleJoin(client, joinRuntimeRequest{
+		WorldSeed: "seed-health",
+		PlayerID:  "defender",
+		StartX:    2,
+		StartZ:    0,
+	})
+
+	attack, _, _, _ := hub.applyCombatAction(combatActionPayload{
+		PlayerID: "attacker",
+		ActionID: "attack-1",
+		SlotID:   "slot-1-rust-blade",
+		Kind:     "melee",
+		TargetID: "defender",
+	})
+	if !attack.Accepted {
+		t.Fatalf("expected attack accepted, got %#v", attack)
+	}
+
+	defenderHealth, ok := hub.healthStateForPlayer("defender")
+	if !ok {
+		t.Fatalf("expected defender health state")
+	}
+	if defenderHealth.Current != defenderHealth.Max-2 {
+		t.Fatalf("expected defender health %d, got %d", defenderHealth.Max-2, defenderHealth.Current)
+	}
+
+	bandage, _, _, _ := hub.applyCombatAction(combatActionPayload{
+		PlayerID: "defender",
+		ActionID: "heal-1",
+		SlotID:   "slot-4-bandage",
+		Kind:     "item",
+	})
+	if !bandage.Accepted {
+		t.Fatalf("expected bandage accepted, got %#v", bandage)
+	}
+
+	healed, ok := hub.healthStateForPlayer("defender")
+	if !ok {
+		t.Fatalf("expected defender health state")
+	}
+	if healed.Current <= defenderHealth.Current {
+		t.Fatalf("expected defender health to increase, before=%d after=%d", defenderHealth.Current, healed.Current)
+	}
+	if healed.Current > healed.Max {
+		t.Fatalf("health should not exceed max, got %d > %d", healed.Current, healed.Max)
 	}
 }
 
@@ -148,7 +206,7 @@ func TestApplyCombatActionValidatesKindAndTargetRange(t *testing.T) {
 		StartZ:    0,
 	})
 
-	missingTarget := hub.applyCombatAction(combatActionPayload{
+	missingTarget, _, _, _ := hub.applyCombatAction(combatActionPayload{
 		PlayerID: "p3",
 		ActionID: "a-missing",
 		SlotID:   "slot-1-rust-blade",
@@ -158,7 +216,7 @@ func TestApplyCombatActionValidatesKindAndTargetRange(t *testing.T) {
 		t.Fatalf("expected missing_target, got %#v", missingTarget)
 	}
 
-	outOfRange := hub.applyCombatAction(combatActionPayload{
+	outOfRange, _, _, _ := hub.applyCombatAction(combatActionPayload{
 		PlayerID:     "p3",
 		ActionID:     "a-range",
 		SlotID:       "slot-2-ember-bolt",
@@ -170,7 +228,7 @@ func TestApplyCombatActionValidatesKindAndTargetRange(t *testing.T) {
 		t.Fatalf("expected target_out_of_range, got %#v", outOfRange)
 	}
 
-	invalidKind := hub.applyCombatAction(combatActionPayload{
+	invalidKind, _, _, _ := hub.applyCombatAction(combatActionPayload{
 		PlayerID:     "p3",
 		ActionID:     "a-kind",
 		SlotID:       "slot-2-ember-bolt",
@@ -182,7 +240,7 @@ func TestApplyCombatActionValidatesKindAndTargetRange(t *testing.T) {
 		t.Fatalf("expected invalid_slot_kind, got %#v", invalidKind)
 	}
 
-	bandage := hub.applyCombatAction(combatActionPayload{
+	bandage, _, _, _ := hub.applyCombatAction(combatActionPayload{
 		PlayerID: "p3",
 		ActionID: "a-self",
 		SlotID:   "slot-4-bandage",
@@ -199,7 +257,7 @@ func TestApplyCombatActionValidatesKindAndTargetRange(t *testing.T) {
 		SelectedIndex: 0,
 		Tick:          hub.tick,
 	}
-	notEquipped := hub.applyCombatAction(combatActionPayload{
+	notEquipped, _, _, _ := hub.applyCombatAction(combatActionPayload{
 		PlayerID:     "p3",
 		ActionID:     "a-no-equip",
 		SlotID:       "slot-2-ember-bolt",
@@ -228,7 +286,7 @@ func TestApplyCombatActionResolvesPlayerTargetCoordinatesAuthoritatively(t *test
 		StartZ:    0,
 	})
 
-	result := hub.applyCombatAction(combatActionPayload{
+	result, _, _, _ := hub.applyCombatAction(combatActionPayload{
 		PlayerID:     "attacker",
 		ActionID:     "resolve-1",
 		SlotID:       "slot-2-ember-bolt",
@@ -259,7 +317,7 @@ func TestApplyCombatActionRejectsUnknownTargetWithoutCoordinates(t *testing.T) {
 		StartZ:    0,
 	})
 
-	result := hub.applyCombatAction(combatActionPayload{
+	result, _, _, _ := hub.applyCombatAction(combatActionPayload{
 		PlayerID: "attacker",
 		ActionID: "unknown-target-1",
 		SlotID:   "slot-2-ember-bolt",
@@ -272,7 +330,7 @@ func TestApplyCombatActionRejectsUnknownTargetWithoutCoordinates(t *testing.T) {
 }
 
 func TestApplyCombatActionResolvesNonPlayerTargetTokenCoordinates(t *testing.T) {
-	targetToken, targetX, targetZ, ok := findFirstResolvableTargetToken("default-seed")
+	targetToken, targetX, targetZ, ok := findFirstResolvableTargetToken("default-seed", 0, 20)
 	if !ok {
 		t.Fatalf("expected at least one resolvable non-player target token")
 	}
@@ -286,7 +344,7 @@ func TestApplyCombatActionResolvesNonPlayerTargetTokenCoordinates(t *testing.T) 
 		StartZ:    targetZ,
 	})
 
-	result := hub.applyCombatAction(combatActionPayload{
+	result, _, _, _ := hub.applyCombatAction(combatActionPayload{
 		PlayerID: "attacker",
 		ActionID: "non-player-token-1",
 		SlotID:   "slot-2-ember-bolt",
@@ -301,6 +359,54 @@ func TestApplyCombatActionResolvesNonPlayerTargetTokenCoordinates(t *testing.T) 
 	}
 	if !nearlyEqual(*result.TargetWorldX, targetX) || !nearlyEqual(*result.TargetWorldZ, targetZ) {
 		t.Fatalf("expected resolved target coordinates x=%f z=%f, got x=%v z=%v", targetX, targetZ, *result.TargetWorldX, *result.TargetWorldZ)
+	}
+}
+
+func TestApplyInteractActionAcceptsNearbyTarget(t *testing.T) {
+	targetToken, targetX, targetZ, ok := findFirstResolvableTargetToken("default-seed", 0, 20)
+	if !ok {
+		t.Fatalf("expected at least one resolvable non-player target token")
+	}
+
+	hub := newWorldHub()
+	client := &clientConn{playerIDs: map[string]struct{}{}}
+	hub.handleJoin(client, joinRuntimeRequest{
+		WorldSeed: "default-seed",
+		PlayerID:  "attacker",
+		StartX:    targetX,
+		StartZ:    targetZ,
+	})
+
+	result := hub.applyInteractAction(interactActionPayload{
+		PlayerID: "attacker",
+		ActionID: "interact-1",
+		TargetID: targetToken,
+	})
+
+	if !result.Accepted {
+		t.Fatalf("expected interaction accepted, got %#v", result)
+	}
+	if result.TargetWorldX == nil || result.TargetWorldZ == nil {
+		t.Fatalf("expected interaction target coordinates, got %#v", result)
+	}
+}
+
+func TestApplyInteractActionRejectsMissingTarget(t *testing.T) {
+	hub := newWorldHub()
+	client := &clientConn{playerIDs: map[string]struct{}{}}
+	hub.handleJoin(client, joinRuntimeRequest{
+		WorldSeed: "seed-interact-missing",
+		PlayerID:  "attacker",
+		StartX:    0,
+		StartZ:    0,
+	})
+
+	result := hub.applyInteractAction(interactActionPayload{
+		PlayerID: "attacker",
+		ActionID: "interact-missing-1",
+	})
+	if result.Accepted || result.Reason != "missing_target" {
+		t.Fatalf("expected missing_target, got %#v", result)
 	}
 }
 
@@ -437,7 +543,7 @@ func TestApplyCombatActionConsumesItemStacks(t *testing.T) {
 
 	for castIndex := 0; castIndex < 3; castIndex++ {
 		hub.tick += 100
-		result := hub.applyCombatAction(combatActionPayload{
+		result, _, _, _ := hub.applyCombatAction(combatActionPayload{
 			PlayerID: "p-item",
 			ActionID: "item-cast-" + intToString(castIndex),
 			SlotID:   "slot-4-bandage",
@@ -457,7 +563,7 @@ func TestApplyCombatActionConsumesItemStacks(t *testing.T) {
 	}
 
 	hub.tick += 100
-	depleted := hub.applyCombatAction(combatActionPayload{
+	depleted, _, _, _ := hub.applyCombatAction(combatActionPayload{
 		PlayerID: "p-item",
 		ActionID: "item-cast-empty",
 		SlotID:   "slot-4-bandage",
@@ -789,6 +895,108 @@ func TestDirectiveAndEventHandlers(t *testing.T) {
 	}
 }
 
+func TestEventFeedCursorPersists(t *testing.T) {
+	hub := newWorldHub()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/openclaw/directives", buildDirectiveHandler(hub))
+	mux.HandleFunc("/openclaw/events", buildEventFeedHandler(hub))
+
+	firstAck := hub.ingestDirective(openclawDirectiveRequest{
+		DirectiveID: "cursor-1",
+		WorldSeed:   "default-seed",
+		Type:        "emit_story_beat",
+		Payload: map[string]any{
+			"beat": "arrival",
+		},
+	})
+	if !firstAck.Accepted {
+		t.Fatalf("expected directive accepted, got %#v", firstAck)
+	}
+
+	firstRequest := httptest.NewRequest(http.MethodGet, "/openclaw/events?cursor=agent-a", nil)
+	firstResponse := httptest.NewRecorder()
+	mux.ServeHTTP(firstResponse, firstRequest)
+	if firstResponse.Code != http.StatusOK {
+		t.Fatalf("expected cursor feed status 200, got %d", firstResponse.Code)
+	}
+	var firstFeed worldEventFeed
+	if err := json.Unmarshal(firstResponse.Body.Bytes(), &firstFeed); err != nil {
+		t.Fatalf("decode cursor feed failed: %v", err)
+	}
+	if len(firstFeed.Events) == 0 {
+		t.Fatalf("expected cursor feed to return events")
+	}
+
+	secondRequest := httptest.NewRequest(http.MethodGet, "/openclaw/events?cursor=agent-a", nil)
+	secondResponse := httptest.NewRecorder()
+	mux.ServeHTTP(secondResponse, secondRequest)
+	if secondResponse.Code != http.StatusOK {
+		t.Fatalf("expected cursor feed status 200, got %d", secondResponse.Code)
+	}
+	var secondFeed worldEventFeed
+	if err := json.Unmarshal(secondResponse.Body.Bytes(), &secondFeed); err != nil {
+		t.Fatalf("decode cursor feed failed: %v", err)
+	}
+	if len(secondFeed.Events) != 0 {
+		t.Fatalf("expected cursor feed to return no new events, got %d", len(secondFeed.Events))
+	}
+
+	secondAck := hub.ingestDirective(openclawDirectiveRequest{
+		DirectiveID: "cursor-2",
+		WorldSeed:   "default-seed",
+		Type:        "emit_story_beat",
+		Payload: map[string]any{
+			"beat": "after",
+		},
+	})
+	if !secondAck.Accepted {
+		t.Fatalf("expected directive accepted, got %#v", secondAck)
+	}
+
+	thirdRequest := httptest.NewRequest(http.MethodGet, "/openclaw/events?cursor=agent-a", nil)
+	thirdResponse := httptest.NewRecorder()
+	mux.ServeHTTP(thirdResponse, thirdRequest)
+	if thirdResponse.Code != http.StatusOK {
+		t.Fatalf("expected cursor feed status 200, got %d", thirdResponse.Code)
+	}
+	var thirdFeed worldEventFeed
+	if err := json.Unmarshal(thirdResponse.Body.Bytes(), &thirdFeed); err != nil {
+		t.Fatalf("decode cursor feed failed: %v", err)
+	}
+	if len(thirdFeed.Events) == 0 {
+		t.Fatalf("expected cursor feed to return new events after ingest")
+	}
+}
+
+func TestDirectiveRateLimit(t *testing.T) {
+	hub := newWorldHub()
+	for index := 0; index < maxDirectivesPerTick; index++ {
+		ack := hub.ingestDirective(openclawDirectiveRequest{
+			DirectiveID: fmt.Sprintf("rate-%d", index),
+			WorldSeed:   "default-seed",
+			Type:        "emit_story_beat",
+			Payload: map[string]any{
+				"beat": fmt.Sprintf("beat-%d", index),
+			},
+		})
+		if !ack.Accepted {
+			t.Fatalf("expected directive accepted, got %#v", ack)
+		}
+	}
+
+	rejected := hub.ingestDirective(openclawDirectiveRequest{
+		DirectiveID: "rate-over",
+		WorldSeed:   "default-seed",
+		Type:        "emit_story_beat",
+		Payload: map[string]any{
+			"beat": "overflow",
+		},
+	})
+	if rejected.Accepted || rejected.Reason != "directive_rate_limited" {
+		t.Fatalf("expected directive_rate_limited, got %#v", rejected)
+	}
+}
+
 func TestSpawnHintLifecycleGuards(t *testing.T) {
 	hub := newWorldHub()
 
@@ -1055,7 +1263,7 @@ func nearlyEqual(left float64, right float64) bool {
 	return diff < 0.000001
 }
 
-func findFirstResolvableTargetToken(worldSeed string) (string, float64, float64, bool) {
+func findFirstResolvableTargetToken(worldSeed string, tick int64, tickRateHz float64) (string, float64, float64, bool) {
 	for chunkX := -2; chunkX <= 2; chunkX++ {
 		for chunkZ := -2; chunkZ <= 2; chunkZ++ {
 			entities := generateChunkEntitiesForTargetResolution(chunkX, chunkZ, worldSeed)
@@ -1064,7 +1272,7 @@ func findFirstResolvableTargetToken(worldSeed string) (string, float64, float64,
 					continue
 				}
 				token := intToString(chunkX) + ":" + intToString(chunkZ) + ":" + entity.entityType + ":" + intToString(index)
-				worldX, worldZ, resolved := resolveNonPlayerTargetCoordinates(token, worldSeed)
+				worldX, worldZ, resolved := resolveNonPlayerTargetCoordinates(token, worldSeed, tick, tickRateHz)
 				if !resolved {
 					continue
 				}

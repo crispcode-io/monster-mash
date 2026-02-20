@@ -1,6 +1,6 @@
 # Implementation + Test Plan (Game Repo)
 
-Updated: 2026-02-17
+Updated: 2026-02-20
 
 ## Scope
 Plan for implementing generation-aware runtime behavior in this repo (`monster-mash`) while the asset generation system is built in a separate project.
@@ -8,7 +8,7 @@ Plan for implementing generation-aware runtime behavior in this repo (`monster-m
 ## Status Snapshot
 1. Step 1: Complete (2026-02-15)
 2. Step 2: Complete (2026-02-15)
-3. Step 3: Not started
+3. Step 3: Complete (2026-02-19)
 4. Step 4: Blocked by external asset-service API availability
 5. Step 5: Partially blocked
 6. Step 6: Mostly blocked
@@ -22,15 +22,27 @@ Plan for implementing generation-aware runtime behavior in this repo (`monster-m
 14. P2 bootstrap (Rust core crate + web wasm bridge + HUD visibility): In progress (2026-02-15)
 15. P2 occupancy-based mesh stats integration (Rust/JS parity path): Complete (2026-02-15)
 
-## Current Execution Track (from CP-0060)
-1. Maintain the multiplayer-first replication baseline:
+## Current Execution Track (from CP-0070)
+1. Fix core game view + UI/UX scale:
+   - correct world scale to Minecraft-like block sizing,
+   - ensure camera framing matches expected first/third-person presentation,
+   - resize layout so the canvas and HUD feel balanced across viewport sizes.
+2. Core gameplay pass:
+   - deterministic NPC wander/idle loop shared by client + server,
+   - target resolution uses live NPC offsets for combat/interaction range checks,
+   - keep deterministic chunk entity generation in sync across client/server.
+3. Terrain alignment pass:
+   - unify deterministic terrain sampling for voxel chunks + entities + overlay placement,
+   - add a heightfield surface mesh for smooth slopes on top of voxels,
+   - ensure player movement stays glued to the smooth surface.
+4. Maintain the multiplayer-first replication baseline:
    - owner-only fanout for private player state (`inventory_state`, `hotbar_state`, `craft_result`, `container_result`),
    - proximity-scoped snapshots for remote player visibility.
-2. Extend deterministic gameplay capture with event-feed cursor snapshots for replay session metadata.
-3. Start OpenClaw event-loop hardening:
+5. Extend deterministic gameplay capture with event-feed cursor snapshots for replay session metadata.
+6. Start OpenClaw event-loop hardening: Complete (CP-0076)
    - polling cursor persistence for `/openclaw/events`,
    - bounded directive budget/rate limits at ingress.
-4. Keep TDD loop strict for every checkpoint:
+7. Keep TDD loop strict for every checkpoint:
    - `cd apps/world-server-go && go test ./...`,
    - `pnpm --filter web test`,
    - `pnpm --filter web lint`,
@@ -187,6 +199,14 @@ Owner: game repo
    - `idle`, `walk`, `run`, `attack_light`, `attack_heavy`, `cast`, `hit_react`, `death`, `interact`
 2. Add deterministic animation state reducer driven by simulation events.
 3. Keep current placeholder sprite animations as fallback until skeletal assets exist.
+
+Status:
+1. Complete on 2026-02-19.
+2. Implemented in:
+   - `apps/web/src/lib/runtime/animation-event-graph.ts`
+   - `apps/web/src/lib/runtime/animation-event-graph.test.ts`
+   - `apps/web/src/components/WorldCanvas.tsx`
+   - `apps/web/src/lib/runtime/index.ts`
 
 Tests:
 1. Unit: event sequence -> deterministic animation state transitions.

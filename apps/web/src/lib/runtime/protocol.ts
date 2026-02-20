@@ -11,6 +11,7 @@ export interface RuntimeInputState {
   moveX: number;
   moveZ: number;
   running: boolean;
+  jump: boolean;
 }
 
 export interface RuntimeBlockPosition {
@@ -71,6 +72,13 @@ export interface RuntimeInventoryState {
   tick: number;
 }
 
+export interface RuntimeHealthState {
+  playerId: string;
+  current: number;
+  max: number;
+  tick: number;
+}
+
 export interface RuntimeCraftRequest {
   actionId: string;
   recipeId: string;
@@ -118,6 +126,14 @@ export interface RuntimeWorldFlagState {
   tick: number;
 }
 
+export interface RuntimeWorldEvent {
+  seq: number;
+  tick: number;
+  type: string;
+  playerId?: string;
+  payload?: Record<string, unknown>;
+}
+
 export interface RuntimeSpawnHint {
   hintId: string;
   label: string;
@@ -156,6 +172,27 @@ export interface RuntimeCombatResult {
   tick: number;
 }
 
+export interface RuntimeInteractRequest {
+  actionId: string;
+  targetId?: string;
+  targetLabel?: string;
+  targetWorldX?: number;
+  targetWorldZ?: number;
+}
+
+export interface RuntimeInteractResult {
+  actionId: string;
+  playerId: string;
+  accepted: boolean;
+  reason?: string;
+  targetId?: string;
+  targetLabel?: string;
+  targetWorldX?: number;
+  targetWorldZ?: number;
+  message?: string;
+  tick: number;
+}
+
 export interface RuntimePlayerSnapshot {
   playerId: string;
   x: number;
@@ -179,15 +216,19 @@ export interface WorldRuntimeClient {
   submitCraftRequest(playerId: string, request: RuntimeCraftRequest): void;
   submitContainerAction(playerId: string, request: RuntimeContainerActionRequest): void;
   submitCombatAction(playerId: string, action: RuntimeCombatActionRequest): void;
+  submitInteractAction(playerId: string, action: RuntimeInteractRequest): void;
   subscribe(listener: (snapshot: WorldRuntimeSnapshot) => void): () => void;
   subscribeBlockDeltas(listener: (delta: RuntimeBlockDelta) => void): () => void;
   subscribeHotbarStates(listener: (state: RuntimeHotbarState) => void): () => void;
   subscribeInventoryStates(listener: (state: RuntimeInventoryState) => void): () => void;
+  subscribeHealthStates(listener: (state: RuntimeHealthState) => void): () => void;
   subscribeCraftResults(listener: (result: RuntimeCraftResult) => void): () => void;
   subscribeContainerStates(listener: (state: RuntimeContainerState) => void): () => void;
   subscribeContainerResults(listener: (result: RuntimeContainerActionResult) => void): () => void;
   subscribeWorldFlagStates(listener: (state: RuntimeWorldFlagState) => void): () => void;
   subscribeWorldDirectiveStates(listener: (state: RuntimeDirectiveState) => void): () => void;
+  subscribeWorldEvents(listener: (event: RuntimeWorldEvent) => void): () => void;
   subscribeCombatResults(listener: (result: RuntimeCombatResult) => void): () => void;
+  subscribeInteractResults(listener: (result: RuntimeInteractResult) => void): () => void;
   dispose(): void;
 }

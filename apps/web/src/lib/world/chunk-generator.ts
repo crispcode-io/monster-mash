@@ -1,4 +1,5 @@
 import { WORLD_CONFIG } from "@/lib/game-contracts";
+import { sampleTerrain } from "@/lib/world/terrain-sampler";
 
 export const CHUNK_GRID_CELLS = 16;
 
@@ -49,8 +50,9 @@ export function generateChunkData(
       const localX = ((cellX + 0.5) * tileSize) - halfChunk;
       const localZ = ((cellZ + 0.5) * tileSize) - halfChunk;
 
-      const path = isPathCell(globalCellX, globalCellZ);
-      const moisture = layeredNoise(globalCellX, globalCellZ);
+      const terrain = sampleTerrain(globalCellX, globalCellZ, worldSeed);
+      const path = terrain.path;
+      const moisture = terrain.moisture;
 
       if (path) {
         terrainTiles.push({ type: "path", x: localX, z: localZ });
@@ -157,21 +159,6 @@ function addFenceEntity(
 
 function randomCellOffset(rng: () => number, tileSize: number): number {
   return (rng() - 0.5) * tileSize * 0.68;
-}
-
-function isPathCell(globalCellX: number, globalCellZ: number): boolean {
-  const bend = Math.sin((globalCellZ + 18) * 0.09) * 2.4;
-  const laneCenter = 8 + bend;
-  const vertical = Math.abs((globalCellX % CHUNK_GRID_CELLS) - laneCenter) <= 1.2;
-  const crossRoad = Math.abs((globalCellZ % 29) - 12) <= 1.1;
-
-  return vertical || crossRoad;
-}
-
-function layeredNoise(x: number, z: number): number {
-  const coarse = Math.sin(x * 0.19 + z * 0.11) * 0.5 + 0.5;
-  const detail = Math.sin(x * 0.63 - z * 0.53) * 0.5 + 0.5;
-  return (coarse * 0.72) + (detail * 0.28);
 }
 
 function hashChunkSeed(chunkX: number, chunkZ: number, worldSeed: string): number {

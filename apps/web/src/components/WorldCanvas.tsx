@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import {
   AssetClass,
   AssetIntentPriority,
+  ChunkManifestPatchResponse,
   DEFAULT_PLACEHOLDER_SLOTS,
   ManifestOverlayState,
   applyManifestToOverlay,
@@ -17,6 +18,7 @@ import { WorldEventType, getWorldOrchestratorClient } from "@/lib/orchestrator";
 import {
   createMeshTimingTracker,
   getChunkMeshTimingAverages,
+  percentile,
   recordMeshTiming,
 } from "@/lib/perf/mesh-timing";
 import {
@@ -34,8 +36,11 @@ import {
   cycleRuntimeResourceIndex,
   cycleTransferAmountIndex,
   createRuntimeClient,
+  createAnimationState,
   formatRuntimeResourceLabel,
   getPlayerPrivateContainerId,
+  reduceAnimationState,
+  resolveAnimationFrameIndex,
   resolveRequestedTransferAmount,
   resolveRuntimeResourceId,
   resolveCraftRecipeByIndex,
@@ -62,6 +67,7 @@ import {
   generateChunkData,
 } from "@/lib/world/chunk-generator";
 import { ChunkManager } from "@/lib/world/chunk-manager";
+import { TerrainSample, sampleTerrain, sampleTerrainAtWorld } from "@/lib/world/terrain-sampler";
 
 interface WorldCanvasProps {
   profile: PlayerProfile;
@@ -106,6 +112,12 @@ interface DirectiveHudState {
   tick: number;
 }
 
+interface HealthHudState {
+  current: number;
+  max: number;
+  tick: number;
+}
+
 interface StoryBeatBannerState {
   beat: string;
   tick: number;
@@ -140,6 +152,17 @@ interface MeshHudState {
   activeChunkUploadAvgMs: number;
   trackedChunks: number;
   workerError: string | null;
+}
+
+interface AssetHudState {
+  placeholderVisibleCount: number;
+  placeholderSlotCount: number;
+  placeholderRatio: number;
+  patchApplySuccessCount: number;
+  patchApplyFailureCount: number;
+  patchLatencyLastMs: number;
+  patchLatencyAvgMs: number;
+  patchLatencyP95Ms: number;
 }
 
 type HotbarActionKind = "melee" | "spell" | "item";
@@ -188,12 +211,24 @@ interface SpriteTextureSet {
   treeC: THREE.CanvasTexture;
 }
 
+interface RemotePlayerState {
+  id: string;
+  sprite: THREE.Sprite;
+  shadow: THREE.Mesh;
+  targetX: number;
+  targetZ: number;
+  speed: number;
+  frame: number;
+}
+
 interface LoadedChunkRecord {
   chunkX: number;
   chunkZ: number;
   group: THREE.Group;
   voxelChunk: VoxelChunkData;
+  surfaceHeights: number[][];
   voxelRenderMesh: THREE.Mesh | null;
+  surfaceMesh: THREE.Mesh | null;
   meshRequestVersion: number;
   overlayGroup: THREE.Group;
   overlayState: ManifestOverlayState;
@@ -252,6 +287,17 @@ const initialMeshHud: MeshHudState = {
   workerError: null,
 };
 
+const initialAssetHud: AssetHudState = {
+  placeholderVisibleCount: 0,
+  placeholderSlotCount: 0,
+  placeholderRatio: 0,
+  patchApplySuccessCount: 0,
+  patchApplyFailureCount: 0,
+  patchLatencyLastMs: 0,
+  patchLatencyAvgMs: 0,
+  patchLatencyP95Ms: 0,
+};
+
 const HOTBAR_SLOTS: HotbarSlot[] = [
   {
     id: "slot-1-rust-blade",
@@ -300,14 +346,35 @@ const HOTBAR_SLOTS: HotbarSlot[] = [
   },
 ];
 
+const VOXEL_BLOCK_SIZE = 4;
+const VOXEL_MAX_HEIGHT = 8;
+const SURFACE_SEGMENT_MULTIPLIER = 4;
+const SURFACE_Y_OFFSET = VOXEL_BLOCK_SIZE * 0.05;
+const RUNTIME_TICK_RATE = 20;
+const NPC_WANDER_RADIUS_MIN = 0.6;
+const NPC_WANDER_RADIUS_MAX = 1.8;
+const NPC_WANDER_SPEED_MIN = 0.02;
+const NPC_WANDER_SPEED_MAX = 0.06;
+const NPC_WANDER_SWAY_MIN = 0.8;
+const NPC_WANDER_SWAY_MAX = 1.4;
+const INTERACT_RANGE = 3.4;
+const JUMP_VELOCITY = VOXEL_BLOCK_SIZE * 3.6;
+const GRAVITY_ACCELERATION = VOXEL_BLOCK_SIZE * 6.0;
+const PLAYER_HEIGHT = VOXEL_BLOCK_SIZE * 1.6;
+const PLAYER_WIDTH = VOXEL_BLOCK_SIZE * 0.9;
+const PLAYER_SHADOW_RADIUS = VOXEL_BLOCK_SIZE * 0.45;
+const THIRD_PERSON_DISTANCE = VOXEL_BLOCK_SIZE * 6.4;
+const THIRD_PERSON_HEIGHT = VOXEL_BLOCK_SIZE * 2.7;
+const FIRST_PERSON_EYE_HEIGHT = VOXEL_BLOCK_SIZE * 1.55;
+const FIRST_PERSON_LOOK_DISTANCE = VOXEL_BLOCK_SIZE * 6.5;
+
 const HOTBAR_UI_SLOT_COUNT = 9;
 const HOTBAR_KEY_TO_INDEX = new Map(
   Array.from({ length: HOTBAR_SLOTS.length }, (_, index) => [String(index + 1), index]),
 );
 const HOTBAR_SLOT_BY_ID = new Map(HOTBAR_SLOTS.map((slot) => [slot.id, slot]));
 const CRAFT_RECIPE_BY_ID = new Map(DEFAULT_RUNTIME_CRAFT_RECIPES.map((recipe) => [recipe.id, recipe]));
-const MAX_HEARTS = 10;
-const CURRENT_HEARTS = 10;
+const DEFAULT_MAX_HEALTH = 10;
 
 const initialCombatHud: CombatHudState = {
   selectedSlotId: HOTBAR_SLOTS[0].id,
@@ -316,11 +383,17 @@ const initialCombatHud: CombatHudState = {
   lastAction: "none",
   lastTarget: "none",
   targetResolution: "none",
-  status: "Select slot (1-5), recipe (6-9), press R to craft, then click to attack/cast.",
+  status: "Select slot (1-5), recipe (6-9), press R to craft, click to attack/cast, F to interact, Space to jump.",
 };
 
 const initialInventoryHud: InventoryHudState = {
   resources: Object.fromEntries(DEFAULT_RUNTIME_RESOURCE_IDS.map((resourceId) => [resourceId, 0])),
+  tick: 0,
+};
+
+const initialHealthHud = {
+  current: DEFAULT_MAX_HEALTH,
+  max: DEFAULT_MAX_HEALTH,
   tick: 0,
 };
 
@@ -361,6 +434,7 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
   const [storyBeatBanner, setStoryBeatBanner] = useState<StoryBeatBannerState | null>(null);
   const [hudToasts, setHudToasts] = useState<HudToast[]>([]);
   const [meshHud, setMeshHud] = useState<MeshHudState>(initialMeshHud);
+  const [assetHud, setAssetHud] = useState<AssetHudState>(initialAssetHud);
   const [showDiagnostics, setShowDiagnostics] = useState(true);
   const [meshDetailMode, setMeshDetailMode] = useState<"basic" | "detailed">("detailed");
   const [showMinimapDebug, setShowMinimapDebug] = useState(true);
@@ -390,6 +464,7 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
   );
   const [combatHud, setCombatHud] = useState<CombatHudState>(initialCombatHud);
   const [inventoryHud, setInventoryHud] = useState<InventoryHudState>(initialInventoryHud);
+  const [healthHud, setHealthHud] = useState<HealthHudState>(initialHealthHud);
   const [containerHud, setContainerHud] = useState<ContainerHudState>(initialContainerHud);
   const [privateContainerHud, setPrivateContainerHud] = useState<ContainerHudState>({
     resources: Object.fromEntries(DEFAULT_RUNTIME_RESOURCE_IDS.map((resourceId) => [resourceId, 0])),
@@ -406,7 +481,16 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
   const meshDetailModeRef = useRef<"basic" | "detailed">("detailed");
   const showMinimapDebugRef = useRef(true);
   const hotbarSlotsRef = useRef<HotbarSlot[]>(hotbarSlots);
+  const wasDownedRef = useRef(false);
+  const defeatedTargetsRef = useRef<Map<string, number>>(new Map());
+  const assetMetricsRef = useRef({
+    patchApplySuccessCount: 0,
+    patchApplyFailureCount: 0,
+    patchLatencySamples: [] as number[],
+    patchLatencyLastMs: 0,
+  });
   const inventoryResourcesRef = useRef<Record<string, number>>({ ...initialInventoryHud.resources });
+  const healthHudRef = useRef<HealthHudState>(initialHealthHud);
   const sharedContainerResourcesRef = useRef<Record<string, number>>({ ...initialContainerHud.resources });
   const privateContainerResourcesRef = useRef<Record<string, number>>({
     ...initialContainerHud.resources,
@@ -422,6 +506,11 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
   const activeHudToasts = useMemo(
     () => hudToasts.filter((toast) => performance.now() < toast.expiresAt),
     [hudToasts],
+  );
+  const resolvedMaxHearts = Math.max(1, Math.round(healthHud.max));
+  const resolvedCurrentHearts = Math.max(
+    0,
+    Math.min(resolvedMaxHearts, Math.round(healthHud.current)),
   );
 
   function handleHotbarSelect(index: number): void {
@@ -442,7 +531,7 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
     setSelectedTransferAmountIndex(clampTransferAmountIndex(index));
   }
 
-  function pushHudToast(message: string, tone: HudToast["tone"], durationMs = 2600): void {
+  const pushHudToast = useCallback((message: string, tone: HudToast["tone"], durationMs = 2600): void => {
     const now = performance.now();
     setHudToasts((previous) => {
       const next = [
@@ -456,7 +545,7 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
       ];
       return next.slice(-5);
     });
-  }
+  }, []);
 
   useEffect(() => {
     cameraModeRef.current = cameraMode;
@@ -503,6 +592,21 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
   useEffect(() => {
     inventoryResourcesRef.current = { ...inventoryHud.resources };
   }, [inventoryHud.resources]);
+
+  useEffect(() => {
+    healthHudRef.current = { ...healthHud };
+  }, [healthHud]);
+
+  useEffect(() => {
+    const downed = healthHud.current <= 0;
+    if (downed && !wasDownedRef.current) {
+      pushHudToast("You are downed. Use a bandage to recover.", "error", 3200);
+    }
+    if (!downed && wasDownedRef.current) {
+      pushHudToast("Recovered.", "success", 2200);
+    }
+    wasDownedRef.current = downed;
+  }, [healthHud, pushHudToast]);
 
   useEffect(() => {
     sharedContainerResourcesRef.current = { ...containerHud.resources };
@@ -584,14 +688,21 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
       return;
     }
 
+    assetMetricsRef.current = {
+      patchApplySuccessCount: 0,
+      patchApplyFailureCount: 0,
+      patchLatencySamples: [],
+      patchLatencyLastMs: 0,
+    };
+
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color("#6b8db7");
-    scene.fog = new THREE.Fog("#6b8db7", 34, 220);
+    scene.background = new THREE.Color("#87bdf5");
+    scene.fog = new THREE.Fog("#b9d9ff", 80, 360);
 
     const aspect = mount.clientWidth / mount.clientHeight;
     const camera = new THREE.PerspectiveCamera(72, aspect, 0.1, 900);
-    camera.position.set(0, 6, 10);
-    camera.lookAt(0, 1.8, 0);
+    camera.position.set(0, THIRD_PERSON_HEIGHT, THIRD_PERSON_DISTANCE);
+    camera.lookAt(0, PLAYER_HEIGHT * 0.55, 0);
 
     const renderer = new THREE.WebGLRenderer({
       antialias: true,
@@ -601,13 +712,13 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
     renderer.setSize(mount.clientWidth, mount.clientHeight);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 0.92;
+    renderer.toneMappingExposure = 1.05;
     mount.appendChild(renderer.domElement);
 
-    scene.add(new THREE.AmbientLight("#d7e8ff", 1.05));
-    scene.add(new THREE.HemisphereLight("#cce0ff", "#3d5a44", 0.48));
-    const sunlight = new THREE.DirectionalLight("#ffe3b6", 0.78);
-    sunlight.position.set(72, 150, 56);
+    scene.add(new THREE.AmbientLight("#cfe2ff", 0.72));
+    scene.add(new THREE.HemisphereLight("#d6ebff", "#2f4b3a", 0.7));
+    const sunlight = new THREE.DirectionalLight("#ffe6bf", 1.05);
+    sunlight.position.set(80, 150, 60);
     scene.add(sunlight);
 
     const worldRoot = new THREE.Group();
@@ -624,31 +735,34 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
       color: profile.appearance.accentColor,
     });
     const playerSprite = new THREE.Sprite(playerMaterial);
-    playerSprite.scale.set(3.2, 3.2, 1);
-    playerSprite.position.y = 1.8;
+    playerSprite.scale.set(PLAYER_WIDTH, PLAYER_HEIGHT, 1);
+    playerSprite.position.y = PLAYER_HEIGHT * 0.5;
     worldRoot.add(playerSprite);
 
     const playerShadow = new THREE.Mesh(
-      new THREE.CircleGeometry(1.08, 12),
+      new THREE.CircleGeometry(PLAYER_SHADOW_RADIUS, 12),
       new THREE.MeshBasicMaterial({ color: "#113f5f", transparent: true, opacity: 0.35 }),
     );
     playerShadow.rotation.x = -Math.PI * 0.5;
-    playerShadow.position.y = 0.04;
+    playerShadow.position.y = 0.06;
     worldRoot.add(playerShadow);
 
     const keyState = new Set<string>();
     const chunkStore = new Map<string, LoadedChunkRecord>();
-    const targetStore = new Map<
-      string,
-      {
-        id: string;
-        label: string;
-        type: "npc" | "wild-mon";
-        object: THREE.Object3D;
-        worldX: number;
-        worldZ: number;
-      }
-    >();
+    type TargetRecord = {
+      id: string;
+      label: string;
+      type: "npc" | "wild-mon";
+      object: THREE.Object3D;
+      chunkX: number;
+      chunkZ: number;
+      baseWorldX: number;
+      baseWorldZ: number;
+      worldX: number;
+      worldZ: number;
+      height: number;
+    };
+    const targetStore = new Map<string, TargetRecord>();
     const playerPosition = new THREE.Vector3();
     const forwardVector = new THREE.Vector3();
     const rightVector = new THREE.Vector3();
@@ -674,11 +788,19 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
         targetWorldZ?: number;
       }
     >();
+    const pendingInteractActions = new Map<
+      string,
+      {
+        targetId?: string;
+        targetLabel: string;
+      }
+    >();
+    const intentChunks = new Set<string>();
+    const patchLatencySampleLimit = 120;
     const turnSpeed = 2.2;
     let activeChunkX = 0;
     let activeChunkZ = 0;
     let lastHudUpdate = 0;
-    let walkClock = 0;
     let isRunning = true;
     let cachedPlayerFrame = 0;
     let yaw = Math.PI;
@@ -692,6 +814,8 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
     let lastPointerX = 0;
     let lastPointerY = 0;
     let patchIntervalId: number | null = null;
+    let verticalVelocity = 0;
+    let jumpQueued = false;
     const runtimeClient: WorldRuntimeClient = createRuntimeClient({ worldSeed });
     runtimeClientRef.current = runtimeClient;
     const runtimeState = {
@@ -701,7 +825,29 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
       tick: 0,
       hasSnapshot: false,
     };
+    let animationState = createAnimationState(performance.now());
     const spawnHintMarkers = new Map<string, THREE.Group>();
+    const remotePlayers = new Map<string, RemotePlayerState>();
+
+    function isTargetActive(targetId: string, target?: TargetRecord): boolean {
+      const respawnTick = defeatedTargetsRef.current.get(targetId);
+      if (respawnTick === undefined) {
+        return true;
+      }
+      if (runtimeState.tick >= respawnTick) {
+        defeatedTargetsRef.current.delete(targetId);
+        const resolved = target ?? targetStore.get(targetId);
+        if (resolved) {
+          resolved.object.visible = true;
+        }
+        return true;
+      }
+      const resolved = target ?? targetStore.get(targetId);
+      if (resolved && resolved.object.visible) {
+        resolved.object.visible = false;
+      }
+      return false;
+    }
 
     function applySpawnHintMarkers(spawnHints: RuntimeSpawnHint[]): void {
       for (const marker of spawnHintMarkers.values()) {
@@ -720,8 +866,10 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
     function buildSpawnHintMarker(spawnHint: RuntimeSpawnHint): THREE.Group {
       const marker = new THREE.Group();
       const beaconColor = hashToColor(`spawn-hint:${spawnHint.hintId}`);
+      const shaftRadius = VOXEL_BLOCK_SIZE * 0.08;
+      const shaftHeight = VOXEL_BLOCK_SIZE * 2.4;
       const shaft = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.2, 0.2, 4, 8),
+        new THREE.CylinderGeometry(shaftRadius, shaftRadius, shaftHeight, 8),
         new THREE.MeshStandardMaterial({
           color: beaconColor,
           emissive: beaconColor,
@@ -730,11 +878,12 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
           metalness: 0.08,
         }),
       );
-      shaft.position.y = 2.1;
+      shaft.position.y = shaftHeight * 0.5;
       marker.add(shaft);
 
+      const haloRadius = VOXEL_BLOCK_SIZE * 0.65;
       const halo = new THREE.Mesh(
-        new THREE.TorusGeometry(1.15, 0.08, 6, 24),
+        new THREE.TorusGeometry(haloRadius, VOXEL_BLOCK_SIZE * 0.04, 6, 24),
         new THREE.MeshBasicMaterial({
           color: beaconColor,
           transparent: true,
@@ -742,7 +891,7 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
         }),
       );
       halo.rotation.x = Math.PI * 0.5;
-      halo.position.y = 0.45;
+      halo.position.y = VOXEL_BLOCK_SIZE * 0.28;
       marker.add(halo);
 
       marker.position.set(
@@ -750,8 +899,53 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
         0,
         (spawnHint.chunkZ * WORLD_CONFIG.chunkSize) + (WORLD_CONFIG.chunkSize * 0.5),
       );
+      marker.position.y = resolveSurfaceHeightAt(marker.position.x, marker.position.z);
       marker.userData.spawnHintId = spawnHint.hintId;
       return marker;
+    }
+
+    function createRemotePlayerSprite(playerId: string): RemotePlayerState {
+      const tint = new THREE.Color(hashToColor(`remote:${playerId}`));
+      const spriteMaterial = new THREE.SpriteMaterial({
+        map: spriteTextures.playerA,
+        transparent: true,
+        color: tint,
+      });
+      const sprite = new THREE.Sprite(spriteMaterial);
+      sprite.scale.set(PLAYER_WIDTH, PLAYER_HEIGHT, 1);
+      sprite.position.y = PLAYER_HEIGHT * 0.5;
+
+      const shadow = new THREE.Mesh(
+        new THREE.CircleGeometry(PLAYER_SHADOW_RADIUS * 0.85, 12),
+        new THREE.MeshBasicMaterial({ color: "#0f2b42", transparent: true, opacity: 0.25 }),
+      );
+      shadow.rotation.x = -Math.PI * 0.5;
+      shadow.position.y = 0.06;
+
+      worldRoot.add(sprite);
+      worldRoot.add(shadow);
+
+      return {
+        id: playerId,
+        sprite,
+        shadow,
+        targetX: 0,
+        targetZ: 0,
+        speed: 0,
+        frame: 0,
+      };
+    }
+
+    function disposeRemotePlayer(state: RemotePlayerState): void {
+      worldRoot.remove(state.sprite);
+      worldRoot.remove(state.shadow);
+      state.sprite.material.dispose();
+      state.shadow.geometry.dispose();
+      if (Array.isArray(state.shadow.material)) {
+        state.shadow.material.forEach((material) => material.dispose());
+      } else {
+        state.shadow.material.dispose();
+      }
     }
 
     const runtimeUnsubscribe = runtimeClient.subscribe((snapshot) => {
@@ -761,6 +955,32 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
         runtimeState.positionZ = self.z;
         runtimeState.speed = self.speed;
         runtimeState.hasSnapshot = true;
+      }
+      const seenRemote = new Set<string>();
+      for (const [playerId, player] of Object.entries(snapshot.players)) {
+        if (playerId === profile.id) {
+          continue;
+        }
+        seenRemote.add(playerId);
+        let remote = remotePlayers.get(playerId);
+        if (!remote) {
+          remote = createRemotePlayerSprite(playerId);
+          remotePlayers.set(playerId, remote);
+          remote.targetX = player.x;
+          remote.targetZ = player.z;
+        const remoteSurface = resolveSurfaceHeightAt(player.x, player.z);
+        remote.sprite.position.set(player.x, remoteSurface + (PLAYER_HEIGHT * 0.5), player.z);
+        remote.shadow.position.set(player.x, remoteSurface + 0.06, player.z);
+      }
+        remote.targetX = player.x;
+        remote.targetZ = player.z;
+        remote.speed = player.speed;
+      }
+      for (const [playerId, remote] of remotePlayers.entries()) {
+        if (!seenRemote.has(playerId)) {
+          disposeRemotePlayer(remote);
+          remotePlayers.delete(playerId);
+        }
       }
       runtimeState.tick = snapshot.tick;
       setRuntimeHud({
@@ -795,6 +1015,17 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
           ...Object.fromEntries(DEFAULT_RUNTIME_RESOURCE_IDS.map((resourceId) => [resourceId, 0])),
           ...state.resources,
         },
+        tick: state.tick,
+      });
+    });
+
+    const runtimeHealthUnsubscribe = runtimeClient.subscribeHealthStates((state) => {
+      if (state.playerId !== profile.id) {
+        return;
+      }
+      setHealthHud({
+        current: state.current,
+        max: state.max,
         tick: state.tick,
       });
     });
@@ -849,6 +1080,30 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
         spawnHints: [...state.spawnHints],
         tick: state.tick,
       });
+    });
+
+    const runtimeWorldEventUnsubscribe = runtimeClient.subscribeWorldEvents((event) => {
+      if (event.type === "entity_defeated") {
+        const payload = event.payload ?? {};
+        const entityType = typeof payload.entityType === "string" ? payload.entityType : "entity";
+        const lootSummary = formatLootSummary(payload.loot as Record<string, unknown> | undefined);
+        const targetId = typeof payload.targetId === "string" ? payload.targetId : "";
+        const respawnTick =
+          typeof payload.respawnTick === "number" && Number.isFinite(payload.respawnTick)
+            ? payload.respawnTick
+            : null;
+        if (targetId && respawnTick !== null) {
+          defeatedTargetsRef.current.set(targetId, respawnTick);
+          const target = targetStore.get(targetId);
+          if (target) {
+            target.object.visible = false;
+          }
+        }
+        const message = lootSummary
+          ? `${entityType} defeated. Loot: ${lootSummary}.`
+          : `${entityType} defeated.`;
+        pushHudToast(message, "success", 2600);
+      }
     });
 
     const runtimeContainerStateUnsubscribe = runtimeClient.subscribeContainerStates((state) => {
@@ -915,6 +1170,13 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
         }
       }
 
+      const animationAction = slotKind === "melee" ? "attack_light" : slotKind === "spell" ? "cast" : "interact";
+      animationState = reduceAnimationState(animationState, {
+        type: "action",
+        action: animationAction,
+        atMs: performance.now(),
+      });
+
       let targetResolution = "none";
       if (pending?.targetId) {
         targetResolution = "client-lock";
@@ -939,6 +1201,44 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
         lastTarget: targetLabel,
         targetResolution,
         status: `${slotLabel} confirmed (${targetResolution})`,
+      });
+    });
+
+    const runtimeInteractUnsubscribe = runtimeClient.subscribeInteractResults((result) => {
+      if (result.playerId !== profile.id) {
+        return;
+      }
+
+      const pending = pendingInteractActions.get(result.actionId);
+      if (pending) {
+        pendingInteractActions.delete(result.actionId);
+      }
+
+      const targetLabel = result.targetLabel ?? pending?.targetLabel ?? "unknown";
+      if (!result.accepted) {
+        const reason = formatCombatRejectReason(result.reason);
+        updateCombatStatus({
+          lastAction: "interact_rejected",
+          lastTarget: targetLabel,
+          targetResolution: "server-reject",
+          status: `Interact rejected (${reason})`,
+        });
+        return;
+      }
+
+      animationState = reduceAnimationState(animationState, {
+        type: "action",
+        action: "interact",
+        atMs: performance.now(),
+      });
+
+      const message = result.message ?? `${targetLabel} acknowledges you.`;
+      pushHudToast(message, "info");
+      updateCombatStatus({
+        lastAction: "interact",
+        lastTarget: targetLabel,
+        targetResolution: "server-confirm",
+        status: `Interacted with ${targetLabel}`,
       });
     });
 
@@ -994,6 +1294,192 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
       return `${chunkX}:${chunkZ}`;
     }
 
+    function buildSurfaceHeights(chunk: VoxelChunkData): number[][] {
+      const heights = Array.from({ length: chunk.gridSize }, () => Array(chunk.gridSize).fill(0));
+      const baseGlobalX = chunk.chunkX * chunk.gridSize;
+      const baseGlobalZ = chunk.chunkZ * chunk.gridSize;
+      for (let x = 0; x < chunk.gridSize; x += 1) {
+        for (let z = 0; z < chunk.gridSize; z += 1) {
+          const terrain = sampleTerrain(baseGlobalX + x, baseGlobalZ + z, chunk.worldSeed, chunk.maxHeight);
+          heights[x][z] = terrain.height * chunk.blockSize;
+        }
+      }
+      return heights;
+    }
+
+    function updateSurfaceHeightColumn(record: LoadedChunkRecord, x: number, z: number): void {
+      if (x < 0 || z < 0 || x >= record.voxelChunk.gridSize || z >= record.voxelChunk.gridSize) {
+        return;
+      }
+      let top = 0;
+      for (let y = record.voxelChunk.maxHeight + 4; y >= 0; y -= 1) {
+        if (hasVoxelBlock(record.voxelChunk, { x, y, z })) {
+          top = y;
+          break;
+        }
+      }
+      record.surfaceHeights[x][z] = (top + 1) * record.voxelChunk.blockSize;
+    }
+
+    function resolveSurfaceHeightAt(worldX: number, worldZ: number): number {
+      const chunkX = Math.floor(worldX / WORLD_CONFIG.chunkSize);
+      const chunkZ = Math.floor(worldZ / WORLD_CONFIG.chunkSize);
+      const record = chunkStore.get(chunkKey(chunkX, chunkZ));
+      if (!record) {
+        const fallback = sampleTerrainAtWorld(
+          worldX,
+          worldZ,
+          worldSeed,
+          VOXEL_MAX_HEIGHT,
+          VOXEL_BLOCK_SIZE,
+        );
+        return fallback.height * VOXEL_BLOCK_SIZE;
+      }
+      return resolveSurfaceHeightInRecord(record, worldX, worldZ);
+    }
+
+    function resolveSurfaceHeightInRecord(
+      record: LoadedChunkRecord,
+      worldX: number,
+      worldZ: number,
+    ): number {
+      const half = WORLD_CONFIG.chunkSize * 0.5;
+      const chunkOriginX = record.chunkX * WORLD_CONFIG.chunkSize;
+      const chunkOriginZ = record.chunkZ * WORLD_CONFIG.chunkSize;
+      const localX = (worldX - chunkOriginX + half) / record.voxelChunk.blockSize;
+      const localZ = (worldZ - chunkOriginZ + half) / record.voxelChunk.blockSize;
+      const maxIndex = record.voxelChunk.gridSize - 1;
+      const x0 = THREE.MathUtils.clamp(Math.floor(localX), 0, maxIndex);
+      const z0 = THREE.MathUtils.clamp(Math.floor(localZ), 0, maxIndex);
+      const x1 = THREE.MathUtils.clamp(x0 + 1, 0, maxIndex);
+      const z1 = THREE.MathUtils.clamp(z0 + 1, 0, maxIndex);
+      const tx = THREE.MathUtils.clamp(localX - x0, 0, 1);
+      const tz = THREE.MathUtils.clamp(localZ - z0, 0, 1);
+
+      const h00 = record.surfaceHeights[x0][z0] ?? 0;
+      const h10 = record.surfaceHeights[x1][z0] ?? h00;
+      const h01 = record.surfaceHeights[x0][z1] ?? h00;
+      const h11 = record.surfaceHeights[x1][z1] ?? h00;
+      const hx0 = THREE.MathUtils.lerp(h00, h10, tx);
+      const hx1 = THREE.MathUtils.lerp(h01, h11, tx);
+      const sampledHeight = THREE.MathUtils.lerp(hx0, hx1, tz);
+
+      const terrainHeight =
+        sampleTerrainAtWorld(
+          worldX,
+          worldZ,
+          worldSeed,
+          record.voxelChunk.maxHeight,
+          record.voxelChunk.blockSize,
+        ).height * record.voxelChunk.blockSize;
+
+      return Math.max(sampledHeight, terrainHeight);
+    }
+
+    function updateNpcWanderPositions(tick: number): void {
+      for (const target of targetStore.values()) {
+        if (target.type !== "npc" && target.type !== "wild-mon") {
+          continue;
+        }
+        if (!isTargetActive(target.id, target)) {
+          continue;
+        }
+        const offset = resolveNpcWanderOffset(target.id, tick);
+        const worldX = target.baseWorldX + offset.x;
+        const worldZ = target.baseWorldZ + offset.z;
+        const surfaceY = resolveSurfaceHeightAt(worldX, worldZ);
+        const localX = worldX - (target.chunkX * WORLD_CONFIG.chunkSize);
+        const localZ = worldZ - (target.chunkZ * WORLD_CONFIG.chunkSize);
+        target.worldX = worldX;
+        target.worldZ = worldZ;
+        target.object.position.set(localX, surfaceY + (target.height * 0.5), localZ);
+      }
+    }
+
+    function shouldSubmitChunkIntents(
+      chunkX: number,
+      chunkZ: number,
+      record?: LoadedChunkRecord,
+    ): boolean {
+      const key = chunkKey(chunkX, chunkZ);
+      if (record?.intentsSubmitted) {
+        return false;
+      }
+      if (intentChunks.has(key)) {
+        if (record) {
+          record.intentsSubmitted = true;
+        }
+        return false;
+      }
+      intentChunks.add(key);
+      if (record) {
+        record.intentsSubmitted = true;
+      }
+      return true;
+    }
+
+    function recordPatchLatency(sampleMs: number): void {
+      const samples = assetMetricsRef.current.patchLatencySamples;
+      samples.push(Math.max(0, sampleMs));
+      if (samples.length > patchLatencySampleLimit) {
+        samples.splice(0, samples.length - patchLatencySampleLimit);
+      }
+      assetMetricsRef.current.patchLatencyLastMs = sampleMs;
+    }
+
+    function recordPatchApplyOutcome(validCount: number, invalidCount: number): void {
+      assetMetricsRef.current.patchApplySuccessCount += validCount;
+      assetMetricsRef.current.patchApplyFailureCount += invalidCount;
+    }
+
+    function countPatchOperations(patch: ChunkManifestPatchResponse): { validCount: number; invalidCount: number } {
+      let validCount = 0;
+      let invalidCount = 0;
+
+      for (const operation of patch.patches) {
+        if (operation.op === "remove") {
+          validCount += 1;
+          continue;
+        }
+        if (operation.assetId && operation.variantHash && operation.uri && operation.tier) {
+          validCount += 1;
+        } else {
+          invalidCount += 1;
+        }
+      }
+
+      return { validCount, invalidCount };
+    }
+
+    function computePlaceholderCounts(): { visible: number; total: number } {
+      let visible = 0;
+      let total = 0;
+      for (const record of chunkStore.values()) {
+        for (const slot of Object.values(record.overlayState.slots)) {
+          total += 1;
+          if (slot.placeholder) {
+            visible += 1;
+          }
+        }
+      }
+      return { visible, total };
+    }
+
+    function refreshAssetHud(): void {
+      const counts = computePlaceholderCounts();
+      const samples = assetMetricsRef.current.patchLatencySamples;
+      setAssetHud({
+        placeholderVisibleCount: counts.visible,
+        placeholderSlotCount: counts.total,
+        placeholderRatio: counts.total > 0 ? counts.visible / counts.total : 0,
+        patchApplySuccessCount: assetMetricsRef.current.patchApplySuccessCount,
+        patchApplyFailureCount: assetMetricsRef.current.patchApplyFailureCount,
+        patchLatencyLastMs: assetMetricsRef.current.patchLatencyLastMs,
+        patchLatencyAvgMs: average(samples),
+        patchLatencyP95Ms: percentile(samples, 0.95),
+      });
+    }
+
     function disposeGroup(group: THREE.Group): void {
       group.traverse((object) => {
         if ((object as THREE.Object3D).userData?.skipDispose) {
@@ -1016,47 +1502,23 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
       group.position.set(chunkX * WORLD_CONFIG.chunkSize, 0, chunkZ * WORLD_CONFIG.chunkSize);
 
       const voxelChunk = createVoxelChunkData(chunkX, chunkZ, worldSeed, {
-        blockSize: 1.6,
-        maxHeight: 9,
+        blockSize: VOXEL_BLOCK_SIZE,
+        maxHeight: VOXEL_MAX_HEIGHT,
       });
+      const surfaceHeights = buildSurfaceHeights(voxelChunk);
       const chunkData = generateChunkData(chunkX, chunkZ, worldSeed);
-
-      const groundColor = new THREE.Color().setHSL(0.32, 0.46, 0.24 + (chunkData.biomeTone * 0.04));
-      const ground = new THREE.Mesh(
-        makeTileGeometry(WORLD_CONFIG.chunkSize, WORLD_CONFIG.chunkSize),
-        new THREE.MeshLambertMaterial({ color: groundColor }),
-      );
-      ground.position.y = 0;
-      group.add(ground);
-
-      const targetIds: string[] = [];
-      chunkData.entities.forEach((entity, entityIndex) => {
-        const entityObject = buildEntity(entity, spriteTextures, chunkData.tileSize);
-        group.add(entityObject);
-        if (entity.type === "npc" || entity.type === "wild-mon") {
-          const targetId = `${chunkX}:${chunkZ}:${entity.type}:${entityIndex}`;
-          entityObject.userData.targetId = targetId;
-          targetStore.set(targetId, {
-            id: targetId,
-            label: entity.type === "npc" ? `NPC ${entityIndex + 1}` : `Monster ${entityIndex + 1}`,
-            type: entity.type,
-            object: entityObject,
-            worldX: (chunkX * WORLD_CONFIG.chunkSize) + entity.x,
-            worldZ: (chunkZ * WORLD_CONFIG.chunkSize) + entity.z,
-          });
-          targetIds.push(targetId);
-        }
-      });
 
       const overlayGroup = new THREE.Group();
       group.add(overlayGroup);
-
+      const targetIds: string[] = [];
       const record: LoadedChunkRecord = {
         chunkX,
         chunkZ,
         group,
         voxelChunk,
+        surfaceHeights,
         voxelRenderMesh: null,
+        surfaceMesh: null,
         meshRequestVersion: 0,
         overlayGroup,
         overlayState: createPlaceholderOverlayState(DEFAULT_PLACEHOLDER_SLOTS),
@@ -1064,7 +1526,40 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
         targetIds,
       };
 
+      chunkData.entities.forEach((entity, entityIndex) => {
+        const worldX = (chunkX * WORLD_CONFIG.chunkSize) + entity.x;
+        const worldZ = (chunkZ * WORLD_CONFIG.chunkSize) + entity.z;
+        const surfaceY = resolveSurfaceHeightInRecord(record, worldX, worldZ);
+        const entityObject = buildEntity(entity, spriteTextures, chunkData.tileSize, surfaceY);
+        group.add(entityObject);
+        if (entity.type === "npc" || entity.type === "wild-mon") {
+          const targetId = `${chunkX}:${chunkZ}:${entity.type}:${entityIndex}`;
+          entityObject.userData.targetId = targetId;
+          const entityHeight =
+            typeof entityObject.userData.entityHeight === "number"
+              ? entityObject.userData.entityHeight
+              : VOXEL_BLOCK_SIZE * 1.6;
+          const targetRecord: TargetRecord = {
+            id: targetId,
+            label: entity.type === "npc" ? `NPC ${entityIndex + 1}` : `Monster ${entityIndex + 1}`,
+            type: entity.type,
+            object: entityObject,
+            chunkX,
+            chunkZ,
+            baseWorldX: worldX,
+            baseWorldZ: worldZ,
+            worldX,
+            worldZ,
+            height: entityHeight,
+          };
+          targetStore.set(targetId, targetRecord);
+          isTargetActive(targetId, targetRecord);
+          record.targetIds.push(targetId);
+        }
+      });
+
       renderVoxelChunk(record);
+      renderSurfaceMesh(record);
       renderChunkOverlay(record);
       return record;
     }
@@ -1087,10 +1582,83 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
         vertices: blockCount * 24,
         indices: blockCount * 36,
       };
+      renderSurfaceMesh(record);
       const occupancyBuffer = buildChunkOccupancyBuffer(record.voxelChunk);
       record.meshRequestVersion += 1;
       const requestVersion = record.meshRequestVersion;
       void requestChunkMeshStats(record, occupancyBuffer, requestVersion);
+    }
+
+    function renderSurfaceMesh(record: LoadedChunkRecord): void {
+      if (record.surfaceMesh) {
+        record.group.remove(record.surfaceMesh);
+        record.surfaceMesh.geometry.dispose();
+        if (Array.isArray(record.surfaceMesh.material)) {
+          record.surfaceMesh.material.forEach((material) => material.dispose());
+        } else {
+          record.surfaceMesh.material.dispose();
+        }
+        record.surfaceMesh = null;
+      }
+
+      const segments = record.voxelChunk.gridSize * SURFACE_SEGMENT_MULTIPLIER;
+      const geometry = new THREE.PlaneGeometry(
+        WORLD_CONFIG.chunkSize,
+        WORLD_CONFIG.chunkSize,
+        segments,
+        segments,
+      );
+      geometry.rotateX(-Math.PI / 2);
+
+      const positions = geometry.attributes.position as THREE.BufferAttribute;
+      const colors = new Float32Array(positions.count * 3);
+      const chunkOriginX = record.chunkX * WORLD_CONFIG.chunkSize;
+      const chunkOriginZ = record.chunkZ * WORLD_CONFIG.chunkSize;
+
+      for (let index = 0; index < positions.count; index += 1) {
+        const localX = positions.getX(index);
+        const localZ = positions.getZ(index);
+        const worldX = chunkOriginX + localX;
+        const worldZ = chunkOriginZ + localZ;
+        const height = resolveSurfaceHeightInRecord(record, worldX, worldZ);
+        positions.setY(index, height);
+
+        const terrain = sampleTerrainAtWorld(
+          worldX,
+          worldZ,
+          worldSeed,
+          record.voxelChunk.maxHeight,
+          record.voxelChunk.blockSize,
+        );
+        const color = resolveTerrainSurfaceColor(
+          terrain,
+          terrain.height,
+          record.voxelChunk.maxHeight,
+          worldX,
+          worldZ,
+        );
+        const colorIndex = index * 3;
+        colors[colorIndex] = color.r;
+        colors[colorIndex + 1] = color.g;
+        colors[colorIndex + 2] = color.b;
+      }
+
+      geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+      geometry.computeVertexNormals();
+
+      const mesh = new THREE.Mesh(
+        geometry,
+        new THREE.MeshLambertMaterial({
+          vertexColors: true,
+          side: THREE.DoubleSide,
+        }),
+      );
+      mesh.position.y = SURFACE_Y_OFFSET;
+      mesh.receiveShadow = true;
+      mesh.userData.isSurfaceMesh = true;
+      mesh.renderOrder = 1;
+      record.surfaceMesh = mesh;
+      record.group.add(mesh);
     }
 
     async function requestChunkMeshStats(
@@ -1127,18 +1695,20 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
         geometry.setIndex(new THREE.BufferAttribute(chunkMesh.indices, 1));
         geometry.computeBoundingSphere();
 
-        const renderMesh = new THREE.Mesh(
-          geometry,
-          new THREE.MeshLambertMaterial({
-            vertexColors: true,
-            side: THREE.DoubleSide,
-          }),
-        );
+        const voxelMaterial = new THREE.MeshLambertMaterial({
+          vertexColors: true,
+          side: THREE.DoubleSide,
+          transparent: true,
+          opacity: 0.01,
+          depthWrite: false,
+        });
+        const renderMesh = new THREE.Mesh(geometry, voxelMaterial);
         const half = WORLD_CONFIG.chunkSize * 0.5;
         renderMesh.position.set(-half, 0, -half);
         renderMesh.scale.setScalar(record.voxelChunk.blockSize);
         renderMesh.userData.isVoxelChunk = true;
         renderMesh.userData.chunkKey = key;
+        renderMesh.renderOrder = 0;
 
         if (record.voxelRenderMesh) {
           record.group.remove(record.voxelRenderMesh);
@@ -1196,23 +1766,24 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
       entity: ChunkEntity,
       textures: SpriteTextureSet,
       tileSize: number,
+      surfaceY: number,
     ): THREE.Object3D {
       if (entity.type === "fence") {
         const fence = new THREE.Mesh(
-          new THREE.BoxGeometry(tileSize * 0.98, 0.6, 0.32),
+          new THREE.BoxGeometry(tileSize * 0.92, VOXEL_BLOCK_SIZE * 0.75, VOXEL_BLOCK_SIZE * 0.2),
           new THREE.MeshLambertMaterial({ color: "#8792ab" }),
         );
-        fence.position.set(entity.x, 0.31, entity.z);
+        fence.position.set(entity.x, surfaceY + (VOXEL_BLOCK_SIZE * 0.38), entity.z);
         fence.rotation.y = entity.rotation;
         return fence;
       }
 
       if (entity.type === "rock") {
         const rock = new THREE.Mesh(
-          new THREE.DodecahedronGeometry(0.58 * entity.scale, 0),
+          new THREE.DodecahedronGeometry(VOXEL_BLOCK_SIZE * 0.42 * entity.scale, 0),
           new THREE.MeshLambertMaterial({ color: entity.variant === 0 ? "#766f65" : "#8a8176" }),
         );
-        rock.position.set(entity.x, 0.55 * entity.scale, entity.z);
+        rock.position.set(entity.x, surfaceY + (VOXEL_BLOCK_SIZE * 0.42 * entity.scale), entity.z);
         return rock;
       }
 
@@ -1231,9 +1802,18 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
         }),
       );
 
-      const baseScale = entity.type === "tree" ? 4.2 : entity.type === "npc" ? 2.7 : 2.2;
-      sprite.scale.set(baseScale * entity.scale, baseScale * entity.scale, 1);
-      sprite.position.set(entity.x, entity.type === "tree" ? 2.1 : 1.25, entity.z);
+      const baseHeight =
+        entity.type === "tree"
+          ? VOXEL_BLOCK_SIZE * 3.6
+          : entity.type === "npc"
+            ? VOXEL_BLOCK_SIZE * 1.7
+            : VOXEL_BLOCK_SIZE * 1.45;
+      const height = baseHeight * entity.scale;
+      const width = height * (entity.type === "tree" ? 0.75 : 0.6);
+      sprite.scale.set(width, height, 1);
+      sprite.position.set(entity.x, surfaceY + (height * 0.5), entity.z);
+      sprite.userData.entityHeight = height;
+      sprite.userData.entityType = entity.type;
       return sprite;
     }
 
@@ -1243,17 +1823,19 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
 
       const slots = Object.values(record.overlayState.slots).sort((a, b) => a.slotId.localeCompare(b.slotId));
       for (const slot of slots) {
-        const overlayObject = buildOverlayObject(slot, record.chunkX, record.chunkZ);
+        const overlayObject = buildOverlayObject(slot, record);
         record.overlayGroup.add(overlayObject);
       }
     }
 
     function buildOverlayObject(
       slot: ManifestOverlayState["slots"][string],
-      chunkX: number,
-      chunkZ: number,
+      record: LoadedChunkRecord,
     ): THREE.Object3D {
-      const { x, z } = getOverlayLocalPosition(slot.slotId, chunkX, chunkZ);
+      const { x, z } = getOverlayLocalPosition(slot.slotId, record.chunkX, record.chunkZ);
+      const worldX = (record.chunkX * WORLD_CONFIG.chunkSize) + x;
+      const worldZ = (record.chunkZ * WORLD_CONFIG.chunkSize) + z;
+      const surfaceY = resolveSurfaceHeightInRecord(record, worldX, worldZ);
       const baseColor = slot.placeholder ? "#665f55" : hashToColor(slot.variantHash);
       const isVolumetric =
         slot.assetClass === "prop_3d" ||
@@ -1262,16 +1844,17 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
         slot.assetClass === "terrain_voxel";
 
       if (isVolumetric) {
+        const baseSize = VOXEL_BLOCK_SIZE * 0.7;
         const mesh = new THREE.Mesh(
-          new THREE.BoxGeometry(2.1, slot.placeholder ? 2 : 3.2, 2.1),
+          new THREE.BoxGeometry(baseSize, slot.placeholder ? baseSize : baseSize * 1.6, baseSize),
           new THREE.MeshLambertMaterial({ color: baseColor }),
         );
-        mesh.position.set(x, slot.placeholder ? 1 : 1.6, z);
+        mesh.position.set(x, surfaceY + ((slot.placeholder ? baseSize : baseSize * 1.6) * 0.5), z);
         return mesh;
       }
 
       const plane = new THREE.Mesh(
-        new THREE.PlaneGeometry(2.6, 3),
+        new THREE.PlaneGeometry(VOXEL_BLOCK_SIZE * 1.05, VOXEL_BLOCK_SIZE * 1.2),
         new THREE.MeshLambertMaterial({
           color: baseColor,
           transparent: true,
@@ -1279,7 +1862,7 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
           side: THREE.DoubleSide,
         }),
       );
-      plane.position.set(x, 1.8, z);
+      plane.position.set(x, surfaceY + (VOXEL_BLOCK_SIZE * 0.75), z);
       plane.rotation.y = Math.PI;
       return plane;
     }
@@ -1317,19 +1900,26 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
     }
 
     async function submitChunkPlaceholderIntents(record: LoadedChunkRecord): Promise<void> {
-      if (record.intentsSubmitted) {
+      await submitChunkPlaceholderIntentsForChunk(record.chunkX, record.chunkZ, "high", record);
+    }
+
+    async function submitChunkPlaceholderIntentsForChunk(
+      chunkX: number,
+      chunkZ: number,
+      priority: AssetIntentPriority,
+      record?: LoadedChunkRecord,
+    ): Promise<void> {
+      if (!shouldSubmitChunkIntents(chunkX, chunkZ, record)) {
         return;
       }
-      record.intentsSubmitted = true;
 
-      const priority: AssetIntentPriority = "high";
       for (const template of DEFAULT_PLACEHOLDER_SLOTS) {
         const semanticTag = template.slotId.split(":")[1] ?? "slot";
         try {
           await assetClient.submitAssetIntent({
-            intentId: `${worldSeed}:${record.chunkX}:${record.chunkZ}:${template.slotId}:${Date.now()}`,
+            intentId: `${worldSeed}:${chunkX}:${chunkZ}:${template.slotId}:${Date.now()}`,
             worldSeed,
-            chunk: { x: record.chunkX, z: record.chunkZ },
+            chunk: { x: chunkX, z: chunkZ },
             assetClass: template.assetClass,
             semanticTags: [semanticTag],
             styleProfileId: "frontier-v1",
@@ -1341,10 +1931,22 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
             },
             priority,
             deadlineMs: 2500,
-            idempotencyKey: `${worldSeed}:${record.chunkX}:${record.chunkZ}:${template.slotId}`,
+            idempotencyKey: `${worldSeed}:${chunkX}:${chunkZ}:${template.slotId}`,
           });
         } catch {
           // Keep placeholders if submission fails.
+        }
+      }
+    }
+
+    function prewarmChunkFrontier(chunkX: number, chunkZ: number): void {
+      const prewarmRadius = WORLD_CONFIG.activeChunkRadius + 1;
+      for (let x = -prewarmRadius; x <= prewarmRadius; x += 1) {
+        for (let z = -prewarmRadius; z <= prewarmRadius; z += 1) {
+          if (Math.max(Math.abs(x), Math.abs(z)) !== prewarmRadius) {
+            continue;
+          }
+          void submitChunkPlaceholderIntentsForChunk(chunkX + x, chunkZ + z, "normal");
         }
       }
     }
@@ -1354,12 +1956,20 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
       await Promise.all(
         records.map(async (record) => {
           try {
+            const startedAt = performance.now();
             const patch = await assetClient.getChunkManifestPatches(
               worldSeed,
               record.chunkX,
               record.chunkZ,
               record.overlayState.manifestVersion,
             );
+            const latencyMs = performance.now() - startedAt;
+            recordPatchLatency(latencyMs);
+
+            if (patch.patches.length > 0) {
+              const { validCount, invalidCount } = countPatchOperations(patch);
+              recordPatchApplyOutcome(validCount, invalidCount);
+            }
 
             if (patch.toVersion <= record.overlayState.manifestVersion || patch.patches.length === 0) {
               return;
@@ -1437,6 +2047,9 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
       let bestDistance = Number.POSITIVE_INFINITY;
 
       for (const target of targetStore.values()) {
+        if (!isTargetActive(target.id, target)) {
+          continue;
+        }
         const dx = target.worldX - worldX;
         const dz = target.worldZ - worldZ;
         const distance = Math.hypot(dx, dz);
@@ -1466,7 +2079,10 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
         if (hit) {
           const targetId = hit.object.userData.targetId;
           if (typeof targetId === "string" && targetStore.has(targetId)) {
-            return targetId;
+            const target = targetStore.get(targetId);
+            if (target && isTargetActive(targetId, target)) {
+              return targetId;
+            }
           }
         }
       }
@@ -1550,6 +2166,7 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
       if (delta.action === "break") {
         const changed = removeVoxelBlock(record.voxelChunk, position);
         if (changed) {
+          updateSurfaceHeightColumn(record, position.x, position.z);
           renderVoxelChunk(record);
         }
         return;
@@ -1557,6 +2174,7 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
 
       const blockType = delta.blockType === "wood" ? "wood" : "dirt";
       setVoxelBlock(record.voxelChunk, position, blockType);
+      updateSurfaceHeightColumn(record, position.x, position.z);
       renderVoxelChunk(record);
     }
 
@@ -1740,6 +2358,47 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
       });
     }
 
+    function executeInteractAction(): void {
+      const targetId = findNearestTarget(playerPosition.x, playerPosition.z, INTERACT_RANGE);
+      if (!targetId) {
+        updateCombatStatus({
+          lastAction: "interact_none",
+          lastTarget: "none",
+          status: "No nearby target to interact with",
+        });
+        return;
+      }
+
+      const target = targetStore.get(targetId);
+      if (!target) {
+        updateCombatStatus({
+          lastAction: "interact_missing",
+          lastTarget: "none",
+          status: "Target is no longer available",
+        });
+        return;
+      }
+
+      const actionId = createEventId();
+      pendingInteractActions.set(actionId, {
+        targetId: target.id,
+        targetLabel: target.label,
+      });
+      runtimeClient.submitInteractAction(profile.id, {
+        actionId,
+        targetId: target.id,
+        targetLabel: target.label,
+        targetWorldX: target.worldX,
+        targetWorldZ: target.worldZ,
+      });
+      updateCombatStatus({
+        lastAction: "interact_request",
+        lastTarget: target.label,
+        targetResolution: "pending",
+        status: `Interacting with ${target.label}...`,
+      });
+    }
+
     function onInteractionClick(clientX: number, clientY: number, button: number): void {
       if (button !== 0 && button !== 2) {
         return;
@@ -1802,6 +2461,20 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
           lastAction: "diagnostics_toggle",
           status: `Minimap debug ${next ? "enabled" : "hidden"}`,
         });
+        event.preventDefault();
+        return;
+      }
+      if (event.code === "Space") {
+        jumpQueued = true;
+        updateCombatStatus({
+          lastAction: "jump",
+          status: "Jump",
+        });
+        event.preventDefault();
+        return;
+      }
+      if (key === "f") {
+        executeInteractAction();
         event.preventDefault();
         return;
       }
@@ -2093,6 +2766,10 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
     renderer.domElement.addEventListener("contextmenu", onContextMenu);
 
     chunkManager.update(activeChunkX * WORLD_CONFIG.chunkSize, activeChunkZ * WORLD_CONFIG.chunkSize);
+    const startChunk = chunkManager.getActiveChunk();
+    activeChunkX = startChunk.chunkX;
+    activeChunkZ = startChunk.chunkZ;
+    prewarmChunkFrontier(activeChunkX, activeChunkZ);
     void emitWorldEvent("world_session_started", {
       startChunkX: activeChunkX,
       startChunkZ: activeChunkZ,
@@ -2138,29 +2815,59 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
       if (moving) {
         moveVector.normalize();
       }
+      const downed = healthHudRef.current.current <= 0;
+      if (downed && jumpQueued) {
+        jumpQueued = false;
+      }
+      const jumpInput = !downed && jumpQueued;
       runtimeClient.setInput(profile.id, {
-        moveX: moveVector.x,
-        moveZ: moveVector.z,
-        running: keyState.has("shift"),
+        moveX: downed ? 0 : moveVector.x,
+        moveZ: downed ? 0 : moveVector.z,
+        running: !downed && keyState.has("shift"),
+        jump: jumpInput,
       });
 
       if (runtimeState.hasSnapshot) {
         playerPosition.x += (runtimeState.positionX - playerPosition.x) * 0.48;
         playerPosition.z += (runtimeState.positionZ - playerPosition.z) * 0.48;
       }
-
-      if (runtimeState.speed > 0.01) {
-        walkClock += deltaSeconds;
+      const surfaceHeight = resolveSurfaceHeightAt(playerPosition.x, playerPosition.z);
+      const grounded = playerPosition.y <= surfaceHeight + 0.04;
+      if (grounded) {
+        playerPosition.y = surfaceHeight;
+        if (jumpQueued) {
+          verticalVelocity = JUMP_VELOCITY;
+          jumpQueued = false;
+        } else {
+          verticalVelocity = Math.max(0, verticalVelocity);
+        }
       } else {
-        walkClock = 0;
+        if (jumpQueued) {
+          jumpQueued = false;
+        }
+        verticalVelocity -= GRAVITY_ACCELERATION * deltaSeconds;
+      }
+      playerPosition.y += verticalVelocity * deltaSeconds;
+      if (playerPosition.y < surfaceHeight) {
+        playerPosition.y = surfaceHeight;
+        verticalVelocity = 0;
       }
 
       playerSprite.position.x = playerPosition.x;
       playerSprite.position.z = playerPosition.z;
+      playerSprite.position.y = playerPosition.y + (PLAYER_HEIGHT * 0.5);
       playerShadow.position.x = playerPosition.x;
       playerShadow.position.z = playerPosition.z;
+      playerShadow.position.y = playerPosition.y + 0.06;
 
-      const frame = runtimeState.speed > 0.01 ? Math.floor(walkClock * 8) % 2 : 0;
+      animationState = reduceAnimationState(animationState, {
+        type: "locomotion",
+        moving: runtimeState.speed > 0.01,
+        running: keyState.has("shift"),
+        atMs: timestamp,
+      });
+      const actionElapsedMs = Math.max(0, timestamp - animationState.actionStartedAtMs);
+      const frame = resolveAnimationFrameIndex(animationState.action, actionElapsedMs);
       if (frame !== cachedPlayerFrame) {
         cachedPlayerFrame = frame;
         playerMaterial.map = frame === 0 ? spriteTextures.playerA : spriteTextures.playerB;
@@ -2172,10 +2879,32 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
       playerSprite.visible = !hideAvatar;
       playerShadow.visible = !hideAvatar;
 
+      for (const remote of remotePlayers.values()) {
+        remote.targetX = Number.isFinite(remote.targetX) ? remote.targetX : 0;
+        remote.targetZ = Number.isFinite(remote.targetZ) ? remote.targetZ : 0;
+        const currentX = remote.sprite.position.x;
+        const currentZ = remote.sprite.position.z;
+        const smoothing = remote.speed > 0.1 ? 0.35 : 0.22;
+        const nextX = currentX + ((remote.targetX - currentX) * smoothing);
+        const nextZ = currentZ + ((remote.targetZ - currentZ) * smoothing);
+        const surfaceY = resolveSurfaceHeightAt(nextX, nextZ);
+        remote.sprite.position.set(nextX, surfaceY + (PLAYER_HEIGHT * 0.5), nextZ);
+        remote.shadow.position.set(nextX, surfaceY + 0.06, nextZ);
+
+        const frame = remote.speed > 0.1 ? (Math.floor(timestamp / 220) % 2) : 0;
+        if (frame !== remote.frame) {
+          remote.frame = frame;
+          const material = remote.sprite.material as THREE.SpriteMaterial;
+          material.map = frame === 0 ? spriteTextures.playerA : spriteTextures.playerB;
+          material.needsUpdate = true;
+        }
+      }
+
       if (chunkManager.update(playerPosition.x, playerPosition.z)) {
         const { chunkX, chunkZ } = chunkManager.getActiveChunk();
         activeChunkX = chunkX;
         activeChunkZ = chunkZ;
+        prewarmChunkFrontier(activeChunkX, activeChunkZ);
         void emitWorldEvent("player_enter_chunk", {
           chunkX: activeChunkX,
           chunkZ: activeChunkZ,
@@ -2185,28 +2914,42 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
       }
 
       if (activeCameraMode === "first-person") {
-        const eyeHeight = 1.7;
-        const lookDistance = 10;
+        const eyeHeight = FIRST_PERSON_EYE_HEIGHT;
+        const lookDistance = FIRST_PERSON_LOOK_DISTANCE;
         const pitchCos = Math.cos(pitch);
-        desiredCameraPosition.set(playerPosition.x, eyeHeight, playerPosition.z);
+        desiredCameraPosition.set(playerPosition.x, playerPosition.y + eyeHeight, playerPosition.z);
         cameraLookTarget.set(
           desiredCameraPosition.x + (forwardVector.x * lookDistance * pitchCos),
           desiredCameraPosition.y + (Math.sin(pitch) * lookDistance),
           desiredCameraPosition.z + (forwardVector.z * lookDistance * pitchCos),
         );
       } else {
-        const trailingDistance = 8;
+        const trailingDistance = THIRD_PERSON_DISTANCE;
         desiredCameraPosition.set(
           playerPosition.x - (forwardVector.x * trailingDistance),
-          5.8,
+          playerPosition.y + THIRD_PERSON_HEIGHT,
           playerPosition.z - (forwardVector.z * trailingDistance),
         );
-        cameraLookTarget.set(playerPosition.x, 2.15, playerPosition.z);
+        cameraLookTarget.set(playerPosition.x, playerPosition.y + (PLAYER_HEIGHT * 0.55), playerPosition.z);
       }
 
       const smoothing = activeCameraMode === "first-person" ? 0.28 : 0.12;
       camera.position.lerp(desiredCameraPosition, smoothing);
       camera.lookAt(cameraLookTarget);
+
+      if (defeatedTargetsRef.current.size > 0) {
+        for (const [targetId, respawnTick] of defeatedTargetsRef.current) {
+          if (runtimeState.tick >= respawnTick) {
+            defeatedTargetsRef.current.delete(targetId);
+            const target = targetStore.get(targetId);
+            if (target) {
+              target.object.visible = true;
+            }
+          }
+        }
+      }
+
+      updateNpcWanderPositions(runtimeState.tick);
 
       renderer.render(scene, camera);
 
@@ -2251,6 +2994,7 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
             trackedChunks: meshTimingTracker.chunkTimings.size,
           }));
         }
+        refreshAssetHud();
         lastHudUpdate = timestamp;
       }
 
@@ -2280,10 +3024,13 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
       runtimeBlockUnsubscribe();
       runtimeHotbarUnsubscribe();
       runtimeInventoryUnsubscribe();
+      runtimeHealthUnsubscribe();
       runtimeWorldFlagUnsubscribe();
       runtimeWorldDirectiveUnsubscribe();
+      runtimeWorldEventUnsubscribe();
       runtimeContainerStateUnsubscribe();
       runtimeCombatUnsubscribe();
+      runtimeInteractUnsubscribe();
       runtimeCraftUnsubscribe();
       runtimeContainerResultUnsubscribe();
       pendingCombatActions.clear();
@@ -2291,6 +3038,11 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
       runtimeClient.dispose();
       runtimeClientRef.current = null;
       meshWorkerClient.dispose();
+
+      for (const remote of remotePlayers.values()) {
+        disposeRemotePlayer(remote);
+      }
+      remotePlayers.clear();
 
       disposeGroup(worldRoot);
       playerMaterial.dispose();
@@ -2309,6 +3061,7 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
     profile.world.id,
     mmCoreError,
     mmCoreReady,
+    pushHudToast,
     privateContainerId,
     worldSeed,
   ]);
@@ -2381,10 +3134,10 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
             {cameraMode === "first-person" ? <div className="first-person-weapon" aria-hidden /> : null}
             <div className="hud-bottom-dock">
               <div className="hearts-row" aria-label="health">
-                {Array.from({ length: MAX_HEARTS }, (_, index) => (
+                {Array.from({ length: resolvedMaxHearts }, (_, index) => (
                   <span
                     key={`heart-${index}`}
-                    className={`heart-icon ${index < CURRENT_HEARTS ? "full" : "empty"}`}
+                    className={`heart-icon ${index < resolvedCurrentHearts ? "full" : "empty"}`}
                     aria-hidden
                   />
                 ))}
@@ -2524,6 +3277,20 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
           {showDiagnostics ? <li>Orchestrator Events: {orchestratorHud.eventsSent}</li> : null}
           {showDiagnostics ? <li>Directives Received: {orchestratorHud.directivesReceived}</li> : null}
           {showDiagnostics ? <li>Last Event: {orchestratorHud.lastEventType}</li> : null}
+          {showDiagnostics ? (
+            <li>
+              Asset Placeholders: {assetHud.placeholderVisibleCount}/{assetHud.placeholderSlotCount} (
+              {(assetHud.placeholderRatio * 100).toFixed(1)}%)
+            </li>
+          ) : null}
+          {showDiagnostics ? <li>Asset Patch OK: {assetHud.patchApplySuccessCount}</li> : null}
+          {showDiagnostics ? <li>Asset Patch Fail: {assetHud.patchApplyFailureCount}</li> : null}
+          {showDiagnostics ? (
+            <li>
+              Patch Latency ms: {assetHud.patchLatencyLastMs.toFixed(1)} (avg{" "}
+              {assetHud.patchLatencyAvgMs.toFixed(1)}, p95 {assetHud.patchLatencyP95Ms.toFixed(1)})
+            </li>
+          ) : null}
           {showDiagnostics && meshDetailMode === "detailed" ? <li>Mesh Extract ms: {meshHud.extractMs.toFixed(2)}</li> : null}
           {showDiagnostics && meshDetailMode === "detailed" ? <li>Mesh Upload ms: {meshHud.uploadMs.toFixed(2)}</li> : null}
           {showDiagnostics && meshDetailMode === "detailed" ? <li>Mesh Extract Avg: {meshHud.extractAvgMs.toFixed(2)}</li> : null}
@@ -2574,21 +3341,15 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
         </ul>
         <p className="muted">
           Drag to rotate camera. Move with W/S and swapped strafe (A=right, D=left). Use 1-5 to select slot and
-          left-click to attack or break blocks. Right-click places a block. Craft flow: choose recipe with 6-9 (or
-          click recipe bar), then press R to craft. Select stash resource with N/M and amount with J/K (or use HUD
-          buttons). Hold Shift for half transfer, or Ctrl/Alt/Cmd for all. Press [ / ] for shared stash and ; /
-          &apos; for private stash transfers. Use F3 to toggle diagnostics, F4 to switch mesh detail mode, and F5 to
-          toggle debug minimap.
+          left-click to attack or break blocks. Right-click places a block. Press F to interact and Space to jump.
+          Craft flow: choose recipe with 6-9 (or click recipe bar), then press R to craft. Select stash resource with
+          N/M and amount with J/K (or use HUD buttons). Hold Shift for half transfer, or Ctrl/Alt/Cmd for all. Press
+          [ / ] for shared stash and ; / &apos; for private stash transfers. Use F3 to toggle diagnostics, F4 to switch
+          mesh detail mode, and F5 to toggle debug minimap.
         </p>
       </aside>
     </section>
   );
-}
-
-function makeTileGeometry(width: number, height: number): THREE.PlaneGeometry {
-  const geometry = new THREE.PlaneGeometry(width, height);
-  geometry.rotateX(-Math.PI * 0.5);
-  return geometry;
 }
 
 function resolveRecipeForClass(assetClass: AssetClass): string {
@@ -2613,6 +3374,28 @@ function numericHash(payload: string): number {
   return hash >>> 0;
 }
 
+function resolveNpcWanderOffset(targetId: string, tick: number): { x: number; z: number } {
+  const seedA = numericHash(`${targetId}:a`);
+  const seedB = numericHash(`${targetId}:b`);
+  const seedC = numericHash(`${targetId}:c`);
+  const unitA = (seedA % 1000) / 1000;
+  const unitB = (seedB % 1000) / 1000;
+  const unitC = (seedC % 1000) / 1000;
+
+  const radius = NPC_WANDER_RADIUS_MIN + (unitA * (NPC_WANDER_RADIUS_MAX - NPC_WANDER_RADIUS_MIN));
+  const speedCycles = NPC_WANDER_SPEED_MIN + (unitB * (NPC_WANDER_SPEED_MAX - NPC_WANDER_SPEED_MIN));
+  const sway = NPC_WANDER_SWAY_MIN + (unitC * (NPC_WANDER_SWAY_MAX - NPC_WANDER_SWAY_MIN));
+  const phaseA = unitA * Math.PI * 2;
+  const phaseB = unitC * Math.PI * 2;
+
+  const seconds = tick / RUNTIME_TICK_RATE;
+  const angle = seconds * speedCycles * Math.PI * 2;
+  return {
+    x: Math.cos(angle + phaseA) * radius,
+    z: Math.sin((angle * sway) + phaseB) * radius * 0.7,
+  };
+}
+
 function hashToColor(payload: string): string {
   const hash = numericHash(payload);
   const hue = hash % 360;
@@ -2623,10 +3406,31 @@ function hashToColor(payload: string): string {
   return `#${color.getHexString()}`;
 }
 
+function average(samples: number[]): number {
+  if (samples.length === 0) {
+    return 0;
+  }
+  let total = 0;
+  for (const sample of samples) {
+    total += sample;
+  }
+  return total / samples.length;
+}
+
 function formatResourceSummary(resources: Record<string, number>): string {
   return DEFAULT_RUNTIME_RESOURCE_IDS
     .map((resourceId) => `${resourceId}:${resources[resourceId] ?? 0}`)
     .join(" ");
+}
+
+function formatLootSummary(loot: Record<string, unknown> | undefined): string {
+  if (!loot) {
+    return "";
+  }
+  const entries = Object.entries(loot)
+    .filter((entry) => typeof entry[1] === "number" && (entry[1] as number) > 0)
+    .map(([key, value]) => `${key} +${value}`);
+  return entries.length > 0 ? entries.join(", ") : "";
 }
 
 function formatWorldFlags(flags: Record<string, string>): string {
@@ -2710,6 +3514,47 @@ function formatContainerRejectReason(reason: string | undefined): string {
     default:
       return reason;
   }
+}
+
+function resolveTerrainSurfaceColor(
+  sample: TerrainSample,
+  heightBlocks: number,
+  maxHeight: number,
+  worldX: number,
+  worldZ: number,
+): THREE.Color {
+  const normalizedHeight = THREE.MathUtils.clamp(heightBlocks / Math.max(1, maxHeight), 0, 1);
+  const moisture = THREE.MathUtils.clamp(sample.moisture, 0, 1);
+
+  if (sample.path || sample.pathMask > 0.6) {
+    const pathColor = new THREE.Color("#b08b5a");
+    const edgeTint = new THREE.Color("#c2a173");
+    return pathColor.lerp(edgeTint, sample.pathMask * 0.45);
+  }
+
+  if (moisture > 0.82 && heightBlocks < maxHeight * 0.6) {
+    const waterBase = new THREE.Color("#4c6e98");
+    return waterBase.lerp(new THREE.Color("#2f567f"), (moisture - 0.82) * 2.4);
+  }
+
+  const hue = 0.3 - (normalizedHeight * 0.05) + ((moisture - 0.5) * 0.025);
+  const saturation = 0.4 + (moisture * 0.22);
+  const lightness = 0.22 + (normalizedHeight * 0.24) + (moisture * 0.06);
+  const color = new THREE.Color();
+  color.setHSL(hue, saturation, lightness);
+
+  const detail = (Math.sin(worldX * 0.23 + worldZ * 0.19) * Math.cos(worldZ * 0.27)) * 0.5 + 0.5;
+  const detailShift = (detail - 0.5) * 0.08;
+  color.offsetHSL(0, 0, detailShift);
+
+  if (sample.ridge > 0.62) {
+    const ridgeBlend = Math.min(1, (sample.ridge - 0.62) / 0.38) * 0.55;
+    color.lerp(new THREE.Color("#6e6a5f"), ridgeBlend);
+  } else if (normalizedHeight > 0.78) {
+    color.lerp(new THREE.Color("#6b705f"), (normalizedHeight - 0.78) * 0.7);
+  }
+
+  return color;
 }
 
 function buildChunkVertexColors(positions: Float32Array, chunkMaxHeight: number): Float32Array {

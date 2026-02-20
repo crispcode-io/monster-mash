@@ -16,6 +16,7 @@ const DEFAULT_INPUT: RuntimeInputState = {
   moveX: 0,
   moveZ: 0,
   running: false,
+  jump: false,
 };
 
 export interface AuthoritativeSimConfig {
@@ -74,6 +75,7 @@ export class AuthoritativeWorldSim {
       moveX: Number.isFinite(input.moveX) ? input.moveX : 0,
       moveZ: Number.isFinite(input.moveZ) ? input.moveZ : 0,
       running: Boolean(input.running),
+      jump: Boolean(input.jump),
     };
   }
 

@@ -2092,3 +2092,531 @@ Purpose: maintain reversible checkpoints so we can backtrack implementation safe
 ### Notes
 1. Backtracking now works both directions: capture (`dump`) and restore (`load`) in a deterministic local sandbox flow.
 2. Next P should attach event-feed cursor metadata to captures and add replay session scripts/docs.
+
+---
+
+## Checkpoint CP-0061 (2026-02-19)
+
+### Completed
+1. Added animation event graph contract with canonical action events and deterministic reducer.
+2. Integrated animation reducer into `WorldCanvas` locomotion/combat flow while keeping sprite placeholders.
+3. Added unit tests for deterministic animation transitions.
+4. Updated implementation plan status for Step 3 completion.
+
+### Files touched
+1. `apps/web/src/lib/runtime/animation-event-graph.ts`
+2. `apps/web/src/lib/runtime/animation-event-graph.test.ts`
+3. `apps/web/src/lib/runtime/index.ts`
+4. `apps/web/src/components/WorldCanvas.tsx`
+5. `docs/implementation-test-plan.md`
+6. `docs/progress-log.md`
+
+### Validation
+1. `pnpm --filter web test` passed (50 tests).
+
+### Notes
+1. Placeholder sprite animations now follow deterministic action transitions until skeletal assets are available.
+
+---
+
+## Checkpoint CP-0062 (2026-02-19)
+
+### Completed
+1. Added client-side asset prewarm requests for frontier chunks to keep asset generation off the critical path.
+2. Tracked asset placeholder visibility and patch apply metrics in the HUD diagnostics.
+3. Recorded patch polling latency samples for asset service responsiveness monitoring.
+
+### Files touched
+1. `apps/web/src/components/WorldCanvas.tsx`
+2. `docs/progress-log.md`
+
+### Validation
+1. Not run (not requested).
+
+### Notes
+1. Asset service integration remains optional; mock/HTTP adapter selection is unchanged and now exposes diagnostics for fallback behavior.
+
+---
+
+## Checkpoint CP-0063 (2026-02-20)
+
+### Completed
+1. Reworked core world scale to read as Minecraft-like blocks:
+   - voxel block size increased to align chunk grid with 16x16 blocks,
+   - player/NPC/prop scales updated to match the new block unit.
+2. Adjusted camera framing and lighting to improve readability:
+   - tuned third-person distance/height and first-person eye height,
+   - brighter sky/fog balance for a clearer horizon.
+3. Updated UI layout sizing:
+   - world canvas now keeps a 16:9 frame on desktop,
+   - right HUD panel uses a responsive width clamp,
+   - canvas scanline overlay is lighter and less obstructive.
+
+### Files touched
+1. `apps/web/src/components/WorldCanvas.tsx`
+2. `apps/web/src/app/globals.css`
+3. `docs/implementation-test-plan.md`
+4. `docs/progress-log.md`
+
+### Validation
+1. `pnpm --filter web test` passed (50 tests).
+2. `pnpm --filter web lint` passed.
+3. `pnpm --filter web typecheck` passed.
+
+### Notes
+1. Core view now aligns with Minecraft-esque block proportions while keeping painterly lighting.
+2. Next P should re-evaluate in-game HUD density against the new scale and update any remaining readability issues.
+
+---
+
+## Checkpoint CP-0064 (2026-02-20)
+
+### Completed
+1. Added dynamic surface height alignment so the camera/player sit on top of voxel terrain:
+   - per-chunk surface height map computed from voxel blocks,
+   - player/camera Y offsets now follow the surface height.
+2. Adjusted canvas sizing to fit within the browser viewport:
+   - canvas height now clamps to available vertical space,
+   - HUD column remains responsive with fixed clamp width.
+3. Maintained sky visibility by lifting camera and aligning with terrain height.
+
+### Files touched
+1. `apps/web/src/components/WorldCanvas.tsx`
+2. `apps/web/src/app/globals.css`
+3. `docs/progress-log.md`
+
+### Validation
+1. `pnpm --filter web test` passed (50 tests).
+2. `pnpm --filter web lint` passed.
+3. `pnpm --filter web typecheck` passed.
+
+### Notes
+1. The world now renders above the player with a visible sky while keeping Minecraft-like block scale.
+
+---
+
+## Checkpoint CP-0065 (2026-02-20)
+
+### Completed
+1. Aligned entity and overlay placement with voxel surface height:
+   - trees/rocks/NPCs now sit on the terrain surface,
+   - asset overlay placeholders inherit surface height.
+2. Added per-column surface-height updates when blocks are placed/broken.
+3. Spawn-hint markers now sit on the terrain surface instead of y=0.
+
+### Files touched
+1. `apps/web/src/components/WorldCanvas.tsx`
+2. `docs/progress-log.md`
+
+### Validation
+1. `pnpm --filter web test` passed (50 tests).
+2. `pnpm --filter web lint` passed.
+3. `pnpm --filter web typecheck` passed.
+
+### Notes
+1. World objects now track the same height field as voxel terrain, eliminating ground-level clipping.
+
+---
+
+## Checkpoint CP-0066 (2026-02-20)
+
+### Completed
+1. Unified terrain sampling across voxel generation and chunk decoration:
+   - added shared deterministic sampler (`sampleTerrain`) for height, moisture, and path masks,
+   - voxel chunk generation now uses the shared sampler.
+2. Added a smooth heightfield surface mesh on top of voxel blocks:
+   - per-chunk surface heights are derived from the sampler,
+   - heightfield mesh uses vertex colors for path/grass/water tones,
+   - player/camera height now interpolates across surface heights for smooth movement.
+3. Removed the flat ground plane and refreshed sky/fog colors to emphasize the open sky.
+
+### Files touched
+1. `apps/web/src/components/WorldCanvas.tsx`
+2. `apps/web/src/lib/voxel/voxel-world.ts`
+3. `apps/web/src/lib/world/chunk-generator.ts`
+4. `apps/web/src/lib/world/terrain-sampler.ts`
+5. `docs/implementation-test-plan.md`
+6. `docs/progress-log.md`
+
+### Validation
+1. Not run (pending): `pnpm --filter web test`
+2. Not run (pending): `pnpm --filter web lint`
+3. `pnpm --filter web typecheck` passed
+
+### Notes
+1. This sets up the painterly terrain foundation: smooth slopes with voxel interactions preserved.
+
+---
+
+## Checkpoint CP-0067 (2026-02-20)
+
+### Completed
+1. Reduced visible blockiness by prioritizing the smooth heightfield surface mesh:
+   - increased surface mesh resolution,
+   - made voxel interaction mesh nearly invisible while keeping raycast hits.
+2. Ensured surface mesh draws above the voxel mesh for cleaner terrain silhouettes.
+
+### Files touched
+1. `apps/web/src/components/WorldCanvas.tsx`
+2. `docs/progress-log.md`
+
+### Validation
+1. Not run (pending): `pnpm --filter web test`
+2. Not run (pending): `pnpm --filter web lint`
+3. Not run (pending): `pnpm --filter web typecheck`
+
+### Notes
+1. Visual focus now emphasizes smooth terrain while preserving voxel interactions for editing.
+
+---
+
+## Checkpoint CP-0068 (2026-02-20)
+
+### Completed
+1. Further reduced voxel visibility while keeping interaction hits:
+   - voxel render opacity lowered to 0.01.
+2. Made surface height sampling use continuous terrain in addition to voxel edits:
+   - height sampling now blends smooth terrain with voxel edits via max height.
+
+### Files touched
+1. `apps/web/src/components/WorldCanvas.tsx`
+2. `docs/progress-log.md`
+
+### Validation
+1. Not run (pending): `pnpm --filter web test`
+2. Not run (pending): `pnpm --filter web lint`
+3. Not run (pending): `pnpm --filter web typecheck`
+
+### Notes
+1. Movement and camera heights now prioritize the smooth terrain surface while still honoring raised edits.
+
+---
+
+## Checkpoint CP-0069 (2026-02-20)
+
+### Completed
+1. Sharpened terrain look with higher contrast lighting and richer surface colors:
+   - adjusted sky/fog palette and light balance,
+   - added per-vertex color variation and ridge-based rock tinting.
+
+### Files touched
+1. `apps/web/src/components/WorldCanvas.tsx`
+2. `docs/progress-log.md`
+
+### Validation
+1. Not run (pending): `pnpm --filter web test`
+2. Not run (pending): `pnpm --filter web lint`
+3. Not run (pending): `pnpm --filter web typecheck`
+
+### Notes
+1. Terrain should read less flat and closer to a “pixelated Skyrim” palette before overlays.
+
+---
+
+## Checkpoint CP-0070 (2026-02-20)
+
+### Completed
+1. Began core gameplay focus with deterministic NPC motion:
+   - NPCs now use a shared wander offset function tied to runtime tick.
+2. Target resolution now respects live NPC offsets (server + client share the same function).
+3. Server-side chunk entity generation now uses the shared terrain sampler for parity.
+
+### Files touched
+1. `apps/web/src/components/WorldCanvas.tsx`
+2. `apps/world-server-go/cmd/world-server/main.go`
+3. `apps/world-server-go/cmd/world-server/main_test.go`
+4. `docs/implementation-test-plan.md`
+5. `docs/progress-log.md`
+
+### Validation
+1. Not run (pending): `pnpm --filter web test`
+2. Not run (pending): `pnpm --filter web lint`
+3. `pnpm --filter web typecheck` passed
+4. `cd apps/world-server-go && go test ./...` passed
+
+### Notes
+1. NPC movement is deterministic and multiplayer-safe; it will be refined once OpenClaw-driven AI is integrated.
+
+---
+
+## Checkpoint CP-0071 (2026-02-20)
+
+### Completed
+1. Added a deterministic interaction action:
+   - new runtime `interact_action`/`interact_result` flow across client + server,
+   - server validates proximity and resolves NPC targets with live wander offsets.
+2. Added jump input + client-side jump physics for immediate gameplay feel.
+
+### Files touched
+1. `apps/web/src/components/WorldCanvas.tsx`
+2. `apps/web/src/lib/runtime/protocol.ts`
+3. `apps/web/src/lib/runtime/authoritative-sim.ts`
+4. `apps/web/src/lib/runtime/local-runtime-client.ts`
+5. `apps/web/src/lib/runtime/ws-runtime-client.ts`
+6. `apps/web/src/lib/runtime/ws-runtime-client.test.ts`
+7. `apps/web/src/lib/runtime/authoritative-sim.test.ts`
+8. `apps/world-server-go/cmd/world-server/main.go`
+9. `apps/world-server-go/cmd/world-server/main_test.go`
+10. `apps/world-server-go/cmd/world-server/ws_integration_test.go`
+11. `docs/progress-log.md`
+
+### Validation
+1. Not run (pending): `pnpm --filter web test`
+2. Not run (pending): `pnpm --filter web lint`
+3. `pnpm --filter web typecheck` passed
+4. `cd apps/world-server-go && go test ./...` passed
+
+### Notes
+1. Interaction flow is server-validated; jump is client-side for now until we add vertical state to snapshots.
+
+---
+
+## Checkpoint CP-0072 (2026-02-20)
+
+### Completed
+1. Added multiplayer fake-client validation for interaction:
+   - new WS integration test ensures `interact_result` only returns to the owning client.
+
+### Files touched
+1. `apps/world-server-go/cmd/world-server/ws_integration_test.go`
+2. `docs/progress-log.md`
+
+### Validation
+1. `cd apps/world-server-go && go test ./...` passed
+2. `cd apps/mm-core-rs && cargo test` passed
+3. `pnpm --filter web lint` passed
+4. `pnpm --filter web typecheck` passed
+5. `pnpm --filter web test` passed
+6. `pnpm --filter web build` passed
+
+### Notes
+1. Fake client integration tests now cover interactions in addition to combat/crafting/block actions.
+
+---
+
+## Checkpoint CP-0073 (2026-02-20)
+
+### Completed
+1. Expanded fake-client coverage to include:
+   - jump input propagation via WS,
+   - leave action removal via WS.
+
+### Files touched
+1. `apps/world-server-go/cmd/world-server/ws_integration_test.go`
+2. `docs/progress-log.md`
+
+### Validation
+1. `cd apps/world-server-go && go test ./...` passed
+
+### Notes
+1. WS fake-client suite now exercises join, input (incl. jump), leave, block, combat, interact, hotbar, craft, container, and world flags/directives.
+
+---
+
+## Checkpoint CP-0074 (2026-02-20)
+
+### Completed
+1. Added remote player rendering for multiplayer:
+   - client now spawns sprites/shadows for other players from runtime snapshots,
+   - interpolates their positions and animates frames based on speed.
+
+### Files touched
+1. `apps/web/src/components/WorldCanvas.tsx`
+2. `docs/progress-log.md`
+
+### Validation
+1. `pnpm --filter web typecheck` passed
+
+### Notes
+1. Remote players now appear in the world and move smoothly based on authoritative snapshots.
+
+---
+
+## Checkpoint CP-0075 (2026-02-20)
+
+### Completed
+1. Cleaned up HUD help text to include interaction + jump controls.
+2. Removed unused helper to keep lint clean.
+
+### Files touched
+1. `apps/web/src/components/WorldCanvas.tsx`
+2. `docs/progress-log.md`
+
+### Validation
+1. `pnpm --filter web lint` passed
+2. `pnpm --filter web test` passed
+3. `cd apps/world-server-go && go test ./...` passed
+
+### Notes
+1. Test suite now green after latest gameplay additions.
+
+---
+
+## Checkpoint CP-0076 (2026-02-20)
+
+### Completed
+1. Hardened OpenClaw ingest + event feed:
+   - added directive rate limit per tick,
+   - added cursor-backed event feed with optional limit.
+2. Added tests for cursor persistence and rate limits.
+
+### Files touched
+1. `apps/world-server-go/cmd/world-server/main.go`
+2. `apps/world-server-go/cmd/world-server/main_test.go`
+3. `docs/progress-log.md`
+
+### Validation
+1. `cd apps/world-server-go && go test ./...` passed
+
+### Notes
+1. OpenClaw event feed now supports `cursor` + `limit` query params and bounded directive intake.
+
+---
+
+## Checkpoint CP-0077 (2026-02-20)
+
+### Completed
+1. Added chunk-distance scoped block delta replication to reduce far-client updates.
+2. Added integration test to ensure nearby clients receive block deltas while far clients do not.
+
+### Files touched
+1. `apps/world-server-go/cmd/world-server/main.go`
+2. `apps/world-server-go/cmd/world-server/ws_integration_test.go`
+3. `docs/progress-log.md`
+
+### Validation
+1. `cd apps/world-server-go && go test ./...` passed
+
+### Notes
+1. Block delta replication now uses a chunk radius of `2` with `worldChunkSize = 64`.
+
+---
+
+## Checkpoint CP-0078 (2026-02-20)
+
+### Completed
+1. Added authoritative health state with combat-driven damage/heal effects.
+2. Health updates now replicate to owning clients via `health_state` envelopes.
+3. Added unit + integration coverage for health state replication.
+4. HUD hearts now reflect server health state.
+
+### Files touched
+1. `apps/world-server-go/cmd/world-server/main.go`
+2. `apps/world-server-go/cmd/world-server/main_test.go`
+3. `apps/world-server-go/cmd/world-server/ws_integration_test.go`
+4. `apps/web/src/lib/runtime/protocol.ts`
+5. `apps/web/src/lib/runtime/local-runtime-client.ts`
+6. `apps/web/src/lib/runtime/ws-runtime-client.ts`
+7. `apps/web/src/lib/runtime/ws-runtime-client.test.ts`
+8. `apps/web/src/components/WorldCanvas.tsx`
+9. `docs/progress-log.md`
+
+### Validation
+1. `cd apps/world-server-go && go test ./...` passed
+2. `cd apps/mm-core-rs && cargo test` passed
+3. `pnpm --filter web lint` passed
+4. `pnpm --filter web typecheck` passed
+5. `pnpm --filter web test` passed
+6. `pnpm --filter web build` passed
+
+### Notes
+1. Damage/heal values are slot-based and deterministic (melee/spell/bomb damage, bandage heal).
+
+---
+
+## Checkpoint CP-0079 (2026-02-20)
+
+### Completed
+1. Added downed-state handling on the client:
+   - movement and jumping are suppressed when health is `0`,
+   - HUD toasts fire on downed/recovered transitions.
+
+### Files touched
+1. `apps/web/src/components/WorldCanvas.tsx`
+2. `docs/progress-log.md`
+
+### Validation
+1. `pnpm --filter web lint` passed
+2. `pnpm --filter web typecheck` passed
+3. `pnpm --filter web test` passed
+4. `pnpm --filter web build` passed
+
+### Notes
+1. Downed recovery currently relies on self-heal items (bandage).
+
+---
+
+## Checkpoint CP-0080 (2026-02-20)
+
+### Completed
+1. Added server-authoritative NPC/wild-mon health, defeat, and loot drops.
+2. Broadcast `world_event` envelopes for `entity_defeated`.
+3. Added client runtime subscriptions for world events and surfaced defeat toasts.
+4. Added test coverage for entity defeat world events + loot replication.
+
+### Files touched
+1. `apps/world-server-go/cmd/world-server/main.go`
+2. `apps/world-server-go/cmd/world-server/main_test.go`
+3. `apps/world-server-go/cmd/world-server/ws_integration_test.go`
+4. `apps/web/src/lib/runtime/protocol.ts`
+5. `apps/web/src/lib/runtime/local-runtime-client.ts`
+6. `apps/web/src/lib/runtime/ws-runtime-client.ts`
+7. `apps/web/src/lib/runtime/ws-runtime-client.test.ts`
+8. `apps/web/src/components/WorldCanvas.tsx`
+9. `docs/progress-log.md`
+
+### Validation
+1. `cd apps/world-server-go && go test ./...` passed
+2. `cd apps/mm-core-rs && cargo test` passed
+3. `pnpm --filter web lint` passed
+4. `pnpm --filter web typecheck` passed
+5. `pnpm --filter web test` passed
+6. `pnpm --filter web build` passed
+
+### Notes
+1. Entity loot is deterministic based on `targetId` and tick; respawn uses `entityRespawnTicks = 600`.
+
+---
+
+## Checkpoint CP-0081 (2026-02-20)
+
+### Completed
+1. Hide defeated NPC/wild-mon targets client-side until their respawn tick.
+2. Prevent combat/interact target selection from locking onto defeated entities.
+3. Restore visibility automatically once respawn ticks elapse.
+
+### Files touched
+1. `apps/web/src/components/WorldCanvas.tsx`
+2. `docs/progress-log.md`
+
+### Validation
+1. `pnpm --filter web lint` passed
+2. `pnpm --filter web typecheck` passed
+3. `pnpm --filter web test` passed
+4. `pnpm --filter web build` passed
+
+### Notes
+1. Respawn visibility restoration occurs lazily in the render loop and via target selection checks.
+
+---
+
+## Checkpoint CP-0082 (2026-02-20)
+
+### Completed
+1. Added `world-bot` multiplayer simulation client that exercises movement, hotbar selection, combat, item use, interact, block break/place, craft, and container operations.
+2. Wired bot simulation into `pnpm game:test` verify flow without blocking live play.
+
+### Files touched
+1. `apps/world-server-go/cmd/world-bot/main.go`
+2. `scripts/play-server.mjs`
+3. `docs/progress-log.md`
+
+### Validation
+1. `cd apps/world-server-go && go test ./...` passed
+2. `pnpm --filter web lint` passed
+3. `pnpm --filter web typecheck` passed
+4. `pnpm --filter web test` passed
+5. `pnpm --filter web build` passed
+
+### Notes
+1. Bot simulation uses deterministic block coordinates to guarantee craftable resources.

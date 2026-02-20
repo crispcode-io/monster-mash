@@ -17,8 +17,8 @@ describe("AuthoritativeWorldSim", () => {
       const moveX = movingRight ? 1 : 0;
       const moveZ = movingForward ? -1 : 0;
 
-      simA.setInput("p1", { moveX, moveZ, running });
-      simB.setInput("p1", { moveX, moveZ, running });
+      simA.setInput("p1", { moveX, moveZ, running, jump: false });
+      simB.setInput("p1", { moveX, moveZ, running, jump: false });
 
       simA.advanceOneTick();
       simB.advanceOneTick();
@@ -41,8 +41,8 @@ describe("AuthoritativeWorldSim", () => {
     simRun.joinPlayer({ worldSeed: "seed-2", playerId: "p1", startX: 0, startZ: 0 });
 
     for (let i = 0; i < 20; i += 1) {
-      simWalk.setInput("p1", { moveX: 1, moveZ: 0, running: false });
-      simRun.setInput("p1", { moveX: 1, moveZ: 0, running: true });
+      simWalk.setInput("p1", { moveX: 1, moveZ: 0, running: false, jump: false });
+      simRun.setInput("p1", { moveX: 1, moveZ: 0, running: true, jump: false });
       simWalk.advanceOneTick();
       simRun.advanceOneTick();
     }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"net"
 	"net/http"
@@ -151,6 +152,52 @@ func TestWebSocketReconnectResumesMovementAndBlockState(t *testing.T) {
 	}
 }
 
+func TestInputStoresJumpState(t *testing.T) {
+	hub := newWorldHub()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", buildWSHandler(hub))
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer conn.Close()
+
+	_ = waitForSnapshot(t, conn, func(snapshot worldRuntimeSnapshot) bool { return snapshot.Tick == 0 })
+
+	writeClientEnvelope(t, conn, "join", joinRuntimeRequest{
+		WorldSeed: "seed-input-jump",
+		PlayerID:  "player-jump",
+		StartX:    0,
+		StartZ:    0,
+	})
+
+	_ = waitForSnapshot(t, conn, func(snapshot worldRuntimeSnapshot) bool {
+		_, ok := snapshot.Players["player-jump"]
+		return ok
+	})
+
+	writeClientEnvelope(t, conn, "input", inputPayload{
+		PlayerID: "player-jump",
+		Input: runtimeInputState{
+			MoveX:   0.5,
+			MoveZ:   -0.25,
+			Running: true,
+			Jump:    true,
+		},
+	})
+
+	input := waitForPlayerInput(t, hub, "player-jump", func(state runtimeInputState) bool {
+		return state.Jump
+	})
+	if !input.Jump {
+		t.Fatalf("expected jump input stored, got %#v", input)
+	}
+}
+
 func TestCombatReplicationTargetsActorAndNearbyPlayers(t *testing.T) {
 	hub := newWorldHub()
 	mux := http.NewServeMux()
@@ -237,6 +284,194 @@ func TestCombatReplicationTargetsActorAndNearbyPlayers(t *testing.T) {
 	}
 
 	assertNoCombatResultWithin(t, farConn, 500*time.Millisecond)
+}
+
+func TestCombatHealthStateReplicatesToTargetOwnerOnly(t *testing.T) {
+	hub := newWorldHub()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", buildWSHandler(hub))
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
+	actorConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial actor failed: %v", err)
+	}
+	defer actorConn.Close()
+	defenderConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial defender failed: %v", err)
+	}
+	defer defenderConn.Close()
+
+	_ = waitForSnapshot(t, actorConn, func(snapshot worldRuntimeSnapshot) bool { return snapshot.Tick == 0 })
+	_ = waitForSnapshot(t, defenderConn, func(snapshot worldRuntimeSnapshot) bool { return snapshot.Tick == 0 })
+
+	writeClientEnvelope(t, actorConn, "join", joinRuntimeRequest{
+		WorldSeed: "seed-health-ws",
+		PlayerID:  "actor-health",
+		StartX:    0,
+		StartZ:    0,
+	})
+	writeClientEnvelope(t, defenderConn, "join", joinRuntimeRequest{
+		WorldSeed: "seed-health-ws",
+		PlayerID:  "defender-health",
+		StartX:    2,
+		StartZ:    0,
+	})
+
+	_ = waitForSnapshot(t, actorConn, func(snapshot worldRuntimeSnapshot) bool {
+		_, ok := snapshot.Players["actor-health"]
+		return ok
+	})
+	_ = waitForSnapshot(t, defenderConn, func(snapshot worldRuntimeSnapshot) bool {
+		_, ok := snapshot.Players["defender-health"]
+		return ok
+	})
+	_ = waitForHealthState(t, actorConn, func(state runtimeHealthState) bool {
+		return state.PlayerID == "actor-health" && state.Current == state.Max
+	})
+	_ = waitForHealthState(t, defenderConn, func(state runtimeHealthState) bool {
+		return state.PlayerID == "defender-health" && state.Current == state.Max
+	})
+
+	writeClientEnvelope(t, actorConn, "combat_action", combatActionPayload{
+		PlayerID: "actor-health",
+		ActionID: "health-hit-1",
+		SlotID:   "slot-1-rust-blade",
+		Kind:     "melee",
+		TargetID: "defender-health",
+	})
+
+	defenderHealth := waitForHealthState(t, defenderConn, func(state runtimeHealthState) bool {
+		return state.PlayerID == "defender-health" && state.Current < state.Max
+	})
+	if defenderHealth.Current != defenderHealth.Max-2 {
+		t.Fatalf("expected defender health %d, got %d", defenderHealth.Max-2, defenderHealth.Current)
+	}
+
+	assertNoHealthStateForPlayerWithin(t, actorConn, "defender-health", 400*time.Millisecond)
+}
+
+func TestEntityDefeatedEmitsWorldEventAndLoot(t *testing.T) {
+	hub := newWorldHub()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", buildWSHandler(hub))
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	worldSeed := "seed-entity-events"
+	targetID, ok := findFirstEntityTargetID(worldSeed, -4, 4)
+	if !ok {
+		t.Fatalf("expected to find entity target in search range")
+	}
+	targetX, targetZ, ok := resolveNonPlayerTargetCoordinates(targetID, worldSeed, hub.tick, hub.tickRateHz)
+	if !ok {
+		t.Fatalf("unable to resolve target coordinates for %s", targetID)
+	}
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
+	actorConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial actor failed: %v", err)
+	}
+	defer actorConn.Close()
+
+	_ = waitForSnapshot(t, actorConn, func(snapshot worldRuntimeSnapshot) bool { return snapshot.Tick == 0 })
+
+	writeClientEnvelope(t, actorConn, "join", joinRuntimeRequest{
+		WorldSeed: worldSeed,
+		PlayerID:  "actor-entity",
+		StartX:    targetX,
+		StartZ:    targetZ,
+	})
+
+	_ = waitForSnapshot(t, actorConn, func(snapshot worldRuntimeSnapshot) bool {
+		_, ok := snapshot.Players["actor-entity"]
+		return ok
+	})
+
+	_ = waitForInventoryState(t, actorConn, func(state runtimeInventoryState) bool {
+		return state.PlayerID == "actor-entity"
+	})
+
+	sendCombat := func(actionID string) {
+		writeClientEnvelope(t, actorConn, "combat_action", combatActionPayload{
+			PlayerID: "actor-entity",
+			ActionID: actionID,
+			SlotID:   "slot-5-bomb",
+			Kind:     "item",
+			TargetID: targetID,
+		})
+	}
+
+	sendCombat("entity-hit-1")
+	_ = waitForCombatResult(t, actorConn, func(result runtimeCombatResult) bool {
+		return result.ActionID == "entity-hit-1" && result.Accepted
+	})
+
+	for tick := int64(0); tick < combatSlotConfigs["slot-5-bomb"].cooldownTicks; tick++ {
+		hub.advanceOneTick()
+	}
+
+	sendCombat("entity-hit-2")
+	_ = waitForCombatResult(t, actorConn, func(result runtimeCombatResult) bool {
+		return result.ActionID == "entity-hit-2" && result.Accepted
+	})
+
+	var defeatEvent worldEvent
+	var inventory runtimeInventoryState
+	foundEvent := false
+	foundInventory := false
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		envelope, ok := readServerEnvelope(t, actorConn)
+		if !ok {
+			continue
+		}
+		switch envelope.Type {
+		case "world_event":
+			var event worldEvent
+			if err := json.Unmarshal(envelope.Payload, &event); err != nil {
+				t.Fatalf("decode world event failed: %v", err)
+			}
+			if event.Type == "entity_defeated" {
+				if target, ok := event.Payload["targetId"].(string); ok && target == targetID {
+					defeatEvent = event
+					foundEvent = true
+				}
+			}
+		case "inventory_state":
+			var state runtimeInventoryState
+			if err := json.Unmarshal(envelope.Payload, &state); err != nil {
+				t.Fatalf("decode inventory state failed: %v", err)
+			}
+			if state.PlayerID == "actor-entity" {
+				inventory = state
+				foundInventory = true
+			}
+		}
+		if foundEvent && foundInventory {
+			break
+		}
+	}
+
+	if !foundEvent {
+		t.Fatalf("expected entity_defeated world event for %s", targetID)
+	}
+	loot := extractLoot(defeatEvent.Payload["loot"])
+	if len(loot) == 0 {
+		t.Fatalf("expected loot payload in entity_defeated event, got %#v", defeatEvent.Payload)
+	}
+	if !foundInventory {
+		t.Fatalf("expected inventory_state after entity defeat")
+	}
+	for resource, amount := range loot {
+		if inventory.Resources[resource] < amount {
+			t.Fatalf("expected loot %s >= %d, got %d", resource, amount, inventory.Resources[resource])
+		}
+	}
 }
 
 func TestCombatResultUsesAuthoritativePlayerTargetCoordinates(t *testing.T) {
@@ -361,7 +596,7 @@ func TestJoinReplicatesWorldFlagState(t *testing.T) {
 }
 
 func TestCombatAcceptsResolvableNonPlayerTargetTokenWithoutCoordinates(t *testing.T) {
-	targetToken, targetX, targetZ, ok := findFirstResolvableTargetToken("seed-non-player-target")
+	targetToken, targetX, targetZ, ok := findFirstResolvableTargetToken("seed-non-player-target", 0, 20)
 	if !ok {
 		t.Fatalf("expected resolvable non-player target token")
 	}
@@ -408,6 +643,71 @@ func TestCombatAcceptsResolvableNonPlayerTargetTokenWithoutCoordinates(t *testin
 	if !nearlyEqual(*result.TargetWorldX, targetX) || !nearlyEqual(*result.TargetWorldZ, targetZ) {
 		t.Fatalf("expected resolved coordinates x=%f z=%f, got x=%v z=%v", targetX, targetZ, *result.TargetWorldX, *result.TargetWorldZ)
 	}
+}
+
+func TestInteractReplicatesResultToOwnerOnly(t *testing.T) {
+	targetToken, targetX, targetZ, ok := findFirstResolvableTargetToken("seed-interact", 0, 20)
+	if !ok {
+		t.Fatalf("expected resolvable non-player target token")
+	}
+
+	hub := newWorldHub()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", buildWSHandler(hub))
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
+	actorConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial actor failed: %v", err)
+	}
+	defer actorConn.Close()
+	peerConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial peer failed: %v", err)
+	}
+	defer peerConn.Close()
+
+	_ = waitForSnapshot(t, actorConn, func(snapshot worldRuntimeSnapshot) bool { return snapshot.Tick == 0 })
+	_ = waitForSnapshot(t, peerConn, func(snapshot worldRuntimeSnapshot) bool { return snapshot.Tick == 0 })
+
+	writeClientEnvelope(t, actorConn, "join", joinRuntimeRequest{
+		WorldSeed: "seed-interact",
+		PlayerID:  "actor-interact",
+		StartX:    targetX,
+		StartZ:    targetZ,
+	})
+	writeClientEnvelope(t, peerConn, "join", joinRuntimeRequest{
+		WorldSeed: "seed-interact",
+		PlayerID:  "peer-interact",
+		StartX:    targetX + 6,
+		StartZ:    targetZ + 6,
+	})
+
+	_ = waitForSnapshot(t, actorConn, func(snapshot worldRuntimeSnapshot) bool {
+		_, ok := snapshot.Players["actor-interact"]
+		return ok
+	})
+	_ = waitForSnapshot(t, peerConn, func(snapshot worldRuntimeSnapshot) bool {
+		_, ok := snapshot.Players["peer-interact"]
+		return ok
+	})
+
+	writeClientEnvelope(t, actorConn, "interact_action", interactActionPayload{
+		PlayerID: "actor-interact",
+		ActionID: "interact-1",
+		TargetID: targetToken,
+	})
+
+	result := waitForInteractResult(t, actorConn, func(result runtimeInteractResult) bool {
+		return result.ActionID == "interact-1"
+	})
+	if !result.Accepted {
+		t.Fatalf("expected interaction accepted, got %#v", result)
+	}
+
+	assertNoEnvelopeTypeWithin(t, peerConn, "interact_result", 500*time.Millisecond)
 }
 
 func TestHotbarSelectionReplicatesToOwnerOnly(t *testing.T) {
@@ -470,6 +770,40 @@ func TestHotbarSelectionReplicatesToOwnerOnly(t *testing.T) {
 	}
 
 	assertNoHotbarStateForPlayerWithin(t, peerConn, "actor-hotbar", 500*time.Millisecond)
+}
+
+func TestLeaveRemovesPlayerFromSnapshots(t *testing.T) {
+	hub := newWorldHub()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", buildWSHandler(hub))
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer conn.Close()
+
+	_ = waitForSnapshot(t, conn, func(snapshot worldRuntimeSnapshot) bool { return snapshot.Tick == 0 })
+
+	writeClientEnvelope(t, conn, "join", joinRuntimeRequest{
+		WorldSeed: "seed-leave",
+		PlayerID:  "player-leave",
+		StartX:    0,
+		StartZ:    0,
+	})
+
+	_ = waitForSnapshot(t, conn, func(snapshot worldRuntimeSnapshot) bool {
+		_, ok := snapshot.Players["player-leave"]
+		return ok
+	})
+
+	writeClientEnvelope(t, conn, "leave", leavePayload{
+		PlayerID: "player-leave",
+	})
+	waitForPlayerRemoval(t, hub, "player-leave")
 }
 
 func TestItemCombatReplicatesUpdatedHotbarToOwnerOnly(t *testing.T) {
@@ -612,6 +946,87 @@ func TestBlockBreakReplicatesInventoryStateToOwnerOnly(t *testing.T) {
 	}
 
 	assertNoInventoryStateForPlayerWithin(t, peerConn, "actor-break", 500*time.Millisecond)
+}
+
+func TestBlockDeltaReplicationScopesByChunkDistance(t *testing.T) {
+	hub := newWorldHub()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", buildWSHandler(hub))
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
+	actorConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial actor failed: %v", err)
+	}
+	defer actorConn.Close()
+	nearConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial near failed: %v", err)
+	}
+	defer nearConn.Close()
+	farConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial far failed: %v", err)
+	}
+	defer farConn.Close()
+
+	_ = waitForSnapshot(t, actorConn, func(snapshot worldRuntimeSnapshot) bool { return snapshot.Tick == 0 })
+	_ = waitForSnapshot(t, nearConn, func(snapshot worldRuntimeSnapshot) bool { return snapshot.Tick == 0 })
+	_ = waitForSnapshot(t, farConn, func(snapshot worldRuntimeSnapshot) bool { return snapshot.Tick == 0 })
+
+	writeClientEnvelope(t, actorConn, "join", joinRuntimeRequest{
+		WorldSeed: "seed-block-interest",
+		PlayerID:  "actor-block",
+		StartX:    0,
+		StartZ:    0,
+	})
+	writeClientEnvelope(t, nearConn, "join", joinRuntimeRequest{
+		WorldSeed: "seed-block-interest",
+		PlayerID:  "near-block",
+		StartX:    worldChunkSize,
+		StartZ:    0,
+	})
+	writeClientEnvelope(t, farConn, "join", joinRuntimeRequest{
+		WorldSeed: "seed-block-interest",
+		PlayerID:  "far-block",
+		StartX:    worldChunkSize * 5,
+		StartZ:    0,
+	})
+
+	_ = waitForSnapshot(t, actorConn, func(snapshot worldRuntimeSnapshot) bool {
+		_, ok := snapshot.Players["actor-block"]
+		return ok
+	})
+	_ = waitForSnapshot(t, nearConn, func(snapshot worldRuntimeSnapshot) bool {
+		_, ok := snapshot.Players["near-block"]
+		return ok
+	})
+	_ = waitForSnapshot(t, farConn, func(snapshot worldRuntimeSnapshot) bool {
+		_, ok := snapshot.Players["far-block"]
+		return ok
+	})
+
+	writeClientEnvelope(t, actorConn, "block_action", blockActionPayload{
+		PlayerID:  "actor-block",
+		Action:    "place",
+		ChunkX:    0,
+		ChunkZ:    0,
+		X:         2,
+		Y:         1,
+		Z:         2,
+		BlockType: "stone",
+	})
+
+	_ = waitForBlockDelta(t, actorConn, func(delta runtimeBlockDelta) bool {
+		return delta.Action == "place" && delta.ChunkX == 0 && delta.ChunkZ == 0 && delta.X == 2 && delta.Y == 1 && delta.Z == 2
+	})
+	_ = waitForBlockDelta(t, nearConn, func(delta runtimeBlockDelta) bool {
+		return delta.Action == "place" && delta.ChunkX == 0 && delta.ChunkZ == 0 && delta.X == 2 && delta.Y == 1 && delta.Z == 2
+	})
+
+	assertNoEnvelopeTypeWithin(t, farConn, "block_delta", 500*time.Millisecond)
 }
 
 func TestCraftRequestReplicatesInventoryAndHotbarUpdatesToOwnerOnly(t *testing.T) {
@@ -1060,6 +1475,73 @@ func waitForCombatResult(
 	return runtimeCombatResult{}
 }
 
+func waitForPlayerInput(
+	t *testing.T,
+	hub *worldHub,
+	playerID string,
+	predicate func(state runtimeInputState) bool,
+) runtimeInputState {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		hub.mu.Lock()
+		player := hub.players[playerID]
+		var state runtimeInputState
+		if player != nil {
+			state = player.Input
+		}
+		hub.mu.Unlock()
+		if player != nil && predicate(state) {
+			return state
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for matching input state")
+	return runtimeInputState{}
+}
+
+func waitForPlayerRemoval(t *testing.T, hub *worldHub, playerID string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		hub.mu.Lock()
+		_, ok := hub.players[playerID]
+		hub.mu.Unlock()
+		if !ok {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for player removal")
+}
+
+func waitForInteractResult(
+	t *testing.T,
+	conn *websocket.Conn,
+	predicate func(result runtimeInteractResult) bool,
+) runtimeInteractResult {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		envelope, ok := readServerEnvelope(t, conn)
+		if !ok {
+			continue
+		}
+		if envelope.Type != "interact_result" {
+			continue
+		}
+		var result runtimeInteractResult
+		if err := json.Unmarshal(envelope.Payload, &result); err != nil {
+			t.Fatalf("decode interact result failed: %v", err)
+		}
+		if predicate(result) {
+			return result
+		}
+	}
+	t.Fatalf("timed out waiting for matching interact result")
+	return runtimeInteractResult{}
+}
+
 func waitForHotbarState(
 	t *testing.T,
 	conn *websocket.Conn,
@@ -1112,6 +1594,33 @@ func waitForInventoryState(
 	}
 	t.Fatalf("timed out waiting for matching inventory state")
 	return runtimeInventoryState{}
+}
+
+func waitForHealthState(
+	t *testing.T,
+	conn *websocket.Conn,
+	predicate func(state runtimeHealthState) bool,
+) runtimeHealthState {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		envelope, ok := readServerEnvelope(t, conn)
+		if !ok {
+			continue
+		}
+		if envelope.Type != "health_state" {
+			continue
+		}
+		var state runtimeHealthState
+		if err := json.Unmarshal(envelope.Payload, &state); err != nil {
+			t.Fatalf("decode health state failed: %v", err)
+		}
+		if predicate(state) {
+			return state
+		}
+	}
+	t.Fatalf("timed out waiting for matching health state")
+	return runtimeHealthState{}
 }
 
 func waitForCraftResult(
@@ -1222,6 +1731,33 @@ func waitForWorldDirectiveState(
 	return runtimeDirectiveState{}
 }
 
+func waitForWorldEvent(
+	t *testing.T,
+	conn *websocket.Conn,
+	predicate func(event worldEvent) bool,
+) worldEvent {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		envelope, ok := readServerEnvelope(t, conn)
+		if !ok {
+			continue
+		}
+		if envelope.Type != "world_event" {
+			continue
+		}
+		var event worldEvent
+		if err := json.Unmarshal(envelope.Payload, &event); err != nil {
+			t.Fatalf("decode world event failed: %v", err)
+		}
+		if predicate(event) {
+			return event
+		}
+	}
+	t.Fatalf("timed out waiting for matching world event")
+	return worldEvent{}
+}
+
 func waitForContainerResult(
 	t *testing.T,
 	conn *websocket.Conn,
@@ -1315,6 +1851,40 @@ func assertNoHotbarStateForPlayerWithin(t *testing.T, conn *websocket.Conn, play
 	}
 }
 
+func assertNoHealthStateForPlayerWithin(t *testing.T, conn *websocket.Conn, playerID string, duration time.Duration) {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(duration)); err != nil {
+		t.Fatalf("set read deadline failed: %v", err)
+	}
+	for {
+		_, payload, err := conn.ReadMessage()
+		if err != nil {
+			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+				return
+			}
+			netError, ok := err.(net.Error)
+			if ok && netError.Timeout() {
+				return
+			}
+			t.Fatalf("read websocket message failed: %v", err)
+		}
+		var envelope rawServerEnvelope
+		if err := json.Unmarshal(payload, &envelope); err != nil {
+			t.Fatalf("decode server envelope failed: %v", err)
+		}
+		if envelope.Type != "health_state" {
+			continue
+		}
+		var state runtimeHealthState
+		if err := json.Unmarshal(envelope.Payload, &state); err != nil {
+			t.Fatalf("decode health state failed: %v", err)
+		}
+		if state.PlayerID == playerID {
+			t.Fatalf("unexpected health_state for %s received: %s", playerID, string(envelope.Payload))
+		}
+	}
+}
+
 func assertNoInventoryStateForPlayerWithin(t *testing.T, conn *websocket.Conn, playerID string, duration time.Duration) {
 	t.Helper()
 	if err := conn.SetReadDeadline(time.Now().Add(duration)); err != nil {
@@ -1349,6 +1919,37 @@ func assertNoInventoryStateForPlayerWithin(t *testing.T, conn *websocket.Conn, p
 	}
 }
 
+func findFirstEntityTargetID(worldSeed string, minChunk int, maxChunk int) (string, bool) {
+	for chunkX := minChunk; chunkX <= maxChunk; chunkX++ {
+		for chunkZ := minChunk; chunkZ <= maxChunk; chunkZ++ {
+			entities := generateChunkEntitiesForTargetResolution(chunkX, chunkZ, worldSeed)
+			for index, entity := range entities {
+				if entity.entityType == "npc" || entity.entityType == "wild-mon" {
+					return fmt.Sprintf("%d:%d:%s:%d", chunkX, chunkZ, entity.entityType, index), true
+				}
+			}
+		}
+	}
+	return "", false
+}
+
+func extractLoot(value any) map[string]int {
+	loot := make(map[string]int)
+	payload, ok := value.(map[string]any)
+	if !ok {
+		return loot
+	}
+	for key, raw := range payload {
+		switch typed := raw.(type) {
+		case float64:
+			loot[key] = int(typed)
+		case int:
+			loot[key] = typed
+		}
+	}
+	return loot
+}
+
 func readServerEnvelope(t *testing.T, conn *websocket.Conn) (rawServerEnvelope, bool) {
 	t.Helper()
 	if err := conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
@@ -1357,7 +1958,7 @@ func readServerEnvelope(t *testing.T, conn *websocket.Conn) (rawServerEnvelope, 
 	_, payload, err := conn.ReadMessage()
 	if err != nil {
 		if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-			return rawServerEnvelope{}, false
+			t.Fatalf("websocket closed unexpectedly: %v", err)
 		}
 		netError, ok := err.(net.Error)
 		if ok && netError.Timeout() {

@@ -70,6 +70,18 @@ async function main() {
     },
   );
 
+  if (verify) {
+    void runOrFail(
+      "go",
+      ["run", "./cmd/world-bot", "--ws", `ws://localhost:${serverPort}/ws`],
+      { cwd: "apps/world-server-go" },
+    ).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[game] Bot simulation failed: ${message}`);
+      process.exitCode = 1;
+    });
+  }
+
   const shutdown = () => {
     if (!server.killed) {
       server.kill("SIGINT");

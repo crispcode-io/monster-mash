@@ -4,14 +4,18 @@ import {
   RuntimeCombatActionRequest,
   RuntimeCombatActionKind,
   RuntimeCombatResult,
+  RuntimeInteractRequest,
+  RuntimeInteractResult,
   RuntimeDirectiveState,
   RuntimeCraftRequest,
   RuntimeCraftResult,
   RuntimeContainerActionRequest,
   RuntimeContainerActionResult,
   RuntimeContainerState,
+  RuntimeHealthState,
   RuntimeInventoryState,
   RuntimeHotbarState,
+  RuntimeWorldEvent,
   RuntimeWorldFlagState,
   JoinRuntimeRequest,
   RuntimeInputState,
@@ -39,6 +43,10 @@ export class WsRuntimeClient implements WorldRuntimeClient {
 
   private readonly inventoryListeners = new Set<(state: RuntimeInventoryState) => void>();
 
+  private readonly healthListeners = new Set<(state: RuntimeHealthState) => void>();
+
+  private readonly worldEventListeners = new Set<(event: RuntimeWorldEvent) => void>();
+
   private readonly craftListeners = new Set<(result: RuntimeCraftResult) => void>();
 
   private readonly containerStateListeners = new Set<(state: RuntimeContainerState) => void>();
@@ -46,6 +54,8 @@ export class WsRuntimeClient implements WorldRuntimeClient {
   private readonly containerResultListeners = new Set<(result: RuntimeContainerActionResult) => void>();
 
   private readonly combatListeners = new Set<(result: RuntimeCombatResult) => void>();
+
+  private readonly interactListeners = new Set<(result: RuntimeInteractResult) => void>();
 
   private readonly worldFlagStateListeners = new Set<(state: RuntimeWorldFlagState) => void>();
 
@@ -168,6 +178,16 @@ export class WsRuntimeClient implements WorldRuntimeClient {
     });
   }
 
+  submitInteractAction(playerId: string, action: RuntimeInteractRequest): void {
+    this.send({
+      type: "interact_action",
+      payload: {
+        playerId,
+        ...action,
+      },
+    });
+  }
+
   subscribe(listener: (snapshot: WorldRuntimeSnapshot) => void): () => void {
     this.listeners.add(listener);
     listener(this.fallbackSnapshot);
@@ -198,6 +218,20 @@ export class WsRuntimeClient implements WorldRuntimeClient {
     };
   }
 
+  subscribeHealthStates(listener: (state: RuntimeHealthState) => void): () => void {
+    this.healthListeners.add(listener);
+    return () => {
+      this.healthListeners.delete(listener);
+    };
+  }
+
+  subscribeWorldEvents(listener: (event: RuntimeWorldEvent) => void): () => void {
+    this.worldEventListeners.add(listener);
+    return () => {
+      this.worldEventListeners.delete(listener);
+    };
+  }
+
   subscribeCraftResults(listener: (result: RuntimeCraftResult) => void): () => void {
     this.craftListeners.add(listener);
     return () => {
@@ -223,6 +257,13 @@ export class WsRuntimeClient implements WorldRuntimeClient {
     this.combatListeners.add(listener);
     return () => {
       this.combatListeners.delete(listener);
+    };
+  }
+
+  subscribeInteractResults(listener: (result: RuntimeInteractResult) => void): () => void {
+    this.interactListeners.add(listener);
+    return () => {
+      this.interactListeners.delete(listener);
     };
   }
 
@@ -258,10 +299,13 @@ export class WsRuntimeClient implements WorldRuntimeClient {
     this.blockListeners.clear();
     this.hotbarListeners.clear();
     this.inventoryListeners.clear();
+    this.healthListeners.clear();
+    this.worldEventListeners.clear();
     this.craftListeners.clear();
     this.containerStateListeners.clear();
     this.containerResultListeners.clear();
     this.combatListeners.clear();
+    this.interactListeners.clear();
     this.worldFlagStateListeners.clear();
     this.worldDirectiveStateListeners.clear();
   }
@@ -315,6 +359,16 @@ export class WsRuntimeClient implements WorldRuntimeClient {
           return;
         }
 
+        if (parsed.type === "health_state") {
+          this.healthListeners.forEach((listener) => listener(parsed.payload));
+          return;
+        }
+
+        if (parsed.type === "world_event") {
+          this.worldEventListeners.forEach((listener) => listener(parsed.payload));
+          return;
+        }
+
         if (parsed.type === "craft_result") {
           this.craftListeners.forEach((listener) => listener(parsed.payload));
           return;
@@ -332,6 +386,11 @@ export class WsRuntimeClient implements WorldRuntimeClient {
 
         if (parsed.type === "combat_result") {
           this.combatListeners.forEach((listener) => listener(parsed.payload));
+          return;
+        }
+
+        if (parsed.type === "interact_result") {
+          this.interactListeners.forEach((listener) => listener(parsed.payload));
           return;
         }
 
@@ -420,10 +479,13 @@ type ParsedServerMessage =
   | { type: "block_delta"; payload: RuntimeBlockDelta }
   | { type: "hotbar_state"; payload: RuntimeHotbarState }
   | { type: "inventory_state"; payload: RuntimeInventoryState }
+  | { type: "health_state"; payload: RuntimeHealthState }
+  | { type: "world_event"; payload: RuntimeWorldEvent }
   | { type: "craft_result"; payload: RuntimeCraftResult }
   | { type: "container_state"; payload: RuntimeContainerState }
   | { type: "container_result"; payload: RuntimeContainerActionResult }
   | { type: "combat_result"; payload: RuntimeCombatResult }
+  | { type: "interact_result"; payload: RuntimeInteractResult }
   | { type: "world_flag_state"; payload: RuntimeWorldFlagState }
   | { type: "world_directive_state"; payload: RuntimeDirectiveState };
 
@@ -466,6 +528,20 @@ function safeParseServerMessage(raw: unknown): ParsedServerMessage | null {
       };
     }
 
+    if (decoded.type === "health_state" && isHealthState(decoded.payload)) {
+      return {
+        type: "health_state",
+        payload: decoded.payload,
+      };
+    }
+
+    if (decoded.type === "world_event" && isWorldEvent(decoded.payload)) {
+      return {
+        type: "world_event",
+        payload: decoded.payload,
+      };
+    }
+
     if (decoded.type === "craft_result" && isCraftResult(decoded.payload)) {
       return {
         type: "craft_result",
@@ -490,6 +566,13 @@ function safeParseServerMessage(raw: unknown): ParsedServerMessage | null {
     if (decoded.type === "combat_result" && isCombatResult(decoded.payload)) {
       return {
         type: "combat_result",
+        payload: decoded.payload,
+      };
+    }
+
+    if (decoded.type === "interact_result" && isInteractResult(decoded.payload)) {
+      return {
+        type: "interact_result",
         payload: decoded.payload,
       };
     }
@@ -571,6 +654,19 @@ function isCombatResult(value: unknown): value is RuntimeCombatResult {
   );
 }
 
+function isInteractResult(value: unknown): value is RuntimeInteractResult {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const payload = value as Partial<RuntimeInteractResult>;
+  return (
+    typeof payload.actionId === "string" &&
+    typeof payload.playerId === "string" &&
+    typeof payload.accepted === "boolean" &&
+    typeof payload.tick === "number"
+  );
+}
+
 function isHotbarState(value: unknown): value is RuntimeHotbarState {
   if (!value || typeof value !== "object") {
     return false;
@@ -602,6 +698,31 @@ function isInventoryState(value: unknown): value is RuntimeInventoryState {
     return false;
   }
   return Object.values(payload.resources).every((count) => typeof count === "number");
+}
+
+function isHealthState(value: unknown): value is RuntimeHealthState {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const payload = value as Partial<RuntimeHealthState>;
+  return (
+    typeof payload.playerId === "string" &&
+    typeof payload.current === "number" &&
+    typeof payload.max === "number" &&
+    typeof payload.tick === "number"
+  );
+}
+
+function isWorldEvent(value: unknown): value is RuntimeWorldEvent {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const payload = value as Partial<RuntimeWorldEvent>;
+  return (
+    typeof payload.type === "string" &&
+    typeof payload.tick === "number" &&
+    typeof payload.seq === "number"
+  );
 }
 
 function isCraftResult(value: unknown): value is RuntimeCraftResult {
