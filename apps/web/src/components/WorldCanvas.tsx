@@ -50,6 +50,7 @@ import {
 } from "@/lib/runtime";
 import { MmCoreRuntimeMode, initializeMmCoreRuntime } from "@/lib/wasm";
 import { MmCoreMeshWorkerClient } from "@/lib/wasm/mm-core-mesh-worker-client";
+import { clearPlayerProfile } from "@/lib/local-profile-store";
 import {
   buildChunkOccupancyBuffer,
   VoxelBlockPosition,
@@ -61,11 +62,7 @@ import {
   resolveVoxelSurfaceHit,
   setVoxelBlock,
 } from "@/lib/voxel";
-import {
-  CHUNK_GRID_CELLS,
-  ChunkEntity,
-  generateChunkData,
-} from "@/lib/world/chunk-generator";
+import { ChunkEntity, generateChunkData } from "@/lib/world/chunk-generator";
 import { ChunkManager } from "@/lib/world/chunk-manager";
 import { TerrainSample, sampleTerrain, sampleTerrainAtWorld } from "@/lib/world/terrain-sampler";
 
@@ -367,6 +364,16 @@ const THIRD_PERSON_DISTANCE = VOXEL_BLOCK_SIZE * 6.4;
 const THIRD_PERSON_HEIGHT = VOXEL_BLOCK_SIZE * 2.7;
 const FIRST_PERSON_EYE_HEIGHT = VOXEL_BLOCK_SIZE * 1.55;
 const FIRST_PERSON_LOOK_DISTANCE = VOXEL_BLOCK_SIZE * 6.5;
+const RENDER_SCALE = 0.85;
+const SKY_TOP_COLOR = "#1c1b35";
+const SKY_HORIZON_COLOR = "#7e8cc3";
+const FOG_COLOR = "#6b7cae";
+const AMBIENT_LIGHT_COLOR = "#c6d4ff";
+const HEMI_SKY_COLOR = "#b9cdfc";
+const HEMI_GROUND_COLOR = "#273b33";
+const SUN_LIGHT_COLOR = "#f2c28a";
+const TORCH_LIGHT_COLOR = "#ffb066";
+const STATUS_RESOURCE_IDS = ["salvage", "wood", "stone"] as const;
 
 const HOTBAR_UI_SLOT_COUNT = 9;
 const HOTBAR_KEY_TO_INDEX = new Map(
@@ -425,7 +432,7 @@ function resolveHotbarSlots(slotIds: string[]): HotbarSlot[] {
 export function WorldCanvas({ profile }: WorldCanvasProps) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const [hud, setHud] = useState<HudState>(initialHud);
-  const [atlasSummary, setAtlasSummary] = useState<AtlasManifestSummary | null>(null);
+  const [, setAtlasSummary] = useState<AtlasManifestSummary | null>(null);
   const [orchestratorHud, setOrchestratorHud] = useState<OrchestratorHudState>(initialOrchestratorHud);
   const [runtimeHud, setRuntimeHud] = useState<RuntimeHudState>(initialRuntimeHud);
   const [worldFlagHud, setWorldFlagHud] = useState<WorldFlagHudState>(initialWorldFlagHud);
@@ -434,18 +441,28 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
   const [storyBeatBanner, setStoryBeatBanner] = useState<StoryBeatBannerState | null>(null);
   const [hudToasts, setHudToasts] = useState<HudToast[]>([]);
   const [meshHud, setMeshHud] = useState<MeshHudState>(initialMeshHud);
-  const [assetHud, setAssetHud] = useState<AssetHudState>(initialAssetHud);
-  const [showDiagnostics, setShowDiagnostics] = useState(true);
+  const [, setAssetHud] = useState<AssetHudState>(initialAssetHud);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [meshDetailMode, setMeshDetailMode] = useState<"basic" | "detailed">("detailed");
-  const [showMinimapDebug, setShowMinimapDebug] = useState(true);
+  const [showMinimapDebug, setShowMinimapDebug] = useState(false);
   const [mmCoreReady, setMmCoreReady] = useState(false);
   const [mmCoreError, setMmCoreError] = useState<string | null>(null);
   const [hotbarSlotIds, setHotbarSlotIds] = useState<string[]>(() => [...DEFAULT_RUNTIME_HOTBAR_SLOT_IDS]);
+  const [hotbarStackCounts, setHotbarStackCounts] = useState<number[]>([]);
   const hotbarSlots = useMemo(() => resolveHotbarSlots(hotbarSlotIds), [hotbarSlotIds]);
   const hotbarUiSlots = useMemo(
     () => Array.from({ length: HOTBAR_UI_SLOT_COUNT }, (_, index) => hotbarSlots[index] ?? null),
     [hotbarSlots],
   );
+  const hotbarUiCounts = useMemo(() => {
+    if (hotbarStackCounts.length === 0) {
+      return Array.from({ length: HOTBAR_UI_SLOT_COUNT }, () => 0);
+    }
+    return Array.from(
+      { length: HOTBAR_UI_SLOT_COUNT },
+      (_, index) => hotbarStackCounts[index] ?? 0,
+    );
+  }, [hotbarStackCounts]);
   const [selectedHotbarIndex, setSelectedHotbarIndex] = useState(0);
   const [selectedCraftRecipeIndex, setSelectedCraftRecipeIndex] = useState(0);
   const [selectedStashResourceIndex, setSelectedStashResourceIndex] = useState(0);
@@ -462,7 +479,7 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
     () => resolveTransferAmount(selectedTransferAmountIndex),
     [selectedTransferAmountIndex],
   );
-  const [combatHud, setCombatHud] = useState<CombatHudState>(initialCombatHud);
+  const [, setCombatHud] = useState<CombatHudState>(initialCombatHud);
   const [inventoryHud, setInventoryHud] = useState<InventoryHudState>(initialInventoryHud);
   const [healthHud, setHealthHud] = useState<HealthHudState>(initialHealthHud);
   const [containerHud, setContainerHud] = useState<ContainerHudState>(initialContainerHud);
@@ -471,15 +488,21 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
     tick: 0,
     containerId: "",
   });
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [minimapHud, setMinimapHud] = useState(() => ({
+    region: formatRegionLabel(profile.origin),
+    biome: "Meadows",
+  }));
   const [cameraMode, setCameraMode] = useState<CameraMode>(() => profile.preferredCamera);
   const cameraModeRef = useRef<CameraMode>(profile.preferredCamera);
+  const menuOpenRef = useRef(menuOpen);
   const selectedHotbarRef = useRef(0);
   const selectedCraftRecipeIndexRef = useRef(0);
   const selectedStashResourceIndexRef = useRef(0);
   const selectedTransferAmountIndexRef = useRef(0);
-  const showDiagnosticsRef = useRef(true);
+  const showDiagnosticsRef = useRef(false);
   const meshDetailModeRef = useRef<"basic" | "detailed">("detailed");
-  const showMinimapDebugRef = useRef(true);
+  const showMinimapDebugRef = useRef(false);
   const hotbarSlotsRef = useRef<HotbarSlot[]>(hotbarSlots);
   const wasDownedRef = useRef(false);
   const defeatedTargetsRef = useRef<Map<string, number>>(new Map());
@@ -506,11 +529,6 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
   const activeHudToasts = useMemo(
     () => hudToasts.filter((toast) => performance.now() < toast.expiresAt),
     [hudToasts],
-  );
-  const resolvedMaxHearts = Math.max(1, Math.round(healthHud.max));
-  const resolvedCurrentHearts = Math.max(
-    0,
-    Math.min(resolvedMaxHearts, Math.round(healthHud.current)),
   );
 
   function handleHotbarSelect(index: number): void {
@@ -588,6 +606,10 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
   useEffect(() => {
     showMinimapDebugRef.current = showMinimapDebug;
   }, [showMinimapDebug]);
+
+  useEffect(() => {
+    menuOpenRef.current = menuOpen;
+  }, [menuOpen]);
 
   useEffect(() => {
     inventoryResourcesRef.current = { ...inventoryHud.resources };
@@ -697,7 +719,9 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color("#87bdf5");
-    scene.fog = new THREE.Fog("#b9d9ff", 80, 360);
+    scene.fog = new THREE.Fog(FOG_COLOR, 110, 460);
+    const skyDome = createSkyDome();
+    scene.add(skyDome);
 
     const aspect = mount.clientWidth / mount.clientHeight;
     const camera = new THREE.PerspectiveCamera(72, aspect, 0.1, 900);
@@ -709,20 +733,24 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
       alpha: false,
       powerPreference: "high-performance",
     });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5) * RENDER_SCALE);
     renderer.setSize(mount.clientWidth, mount.clientHeight);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.05;
+    renderer.toneMappingExposure = 1.12;
+    renderer.domElement.style.imageRendering = "pixelated";
     mount.appendChild(renderer.domElement);
 
-    scene.add(new THREE.AmbientLight("#cfe2ff", 0.72));
-    scene.add(new THREE.HemisphereLight("#d6ebff", "#2f4b3a", 0.7));
-    const sunlight = new THREE.DirectionalLight("#ffe6bf", 1.05);
-    sunlight.position.set(80, 150, 60);
+    scene.add(new THREE.AmbientLight(AMBIENT_LIGHT_COLOR, 0.7));
+    scene.add(new THREE.HemisphereLight(HEMI_SKY_COLOR, HEMI_GROUND_COLOR, 0.7));
+    const sunlight = new THREE.DirectionalLight(SUN_LIGHT_COLOR, 1.05);
+    sunlight.position.set(60, 120, 40);
     scene.add(sunlight);
 
     const worldRoot = new THREE.Group();
     scene.add(worldRoot);
+    const torchLight = new THREE.PointLight(TORCH_LIGHT_COLOR, 0.85, VOXEL_BLOCK_SIZE * 30, 1.8);
+    worldRoot.add(torchLight);
     const spawnHintRoot = new THREE.Group();
     worldRoot.add(spawnHintRoot);
     const meshWorkerClient = new MmCoreMeshWorkerClient();
@@ -1000,6 +1028,9 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
       }
       if (state.slotIds.length > 0) {
         setHotbarSlotIds(state.slotIds.slice(0, HOTBAR_UI_SLOT_COUNT));
+      }
+      if (state.stackCounts.length > 0) {
+        setHotbarStackCounts(state.stackCounts.slice(0, HOTBAR_UI_SLOT_COUNT));
       }
       const slotCount = state.slotIds.length > 0 ? state.slotIds.length : hotbarSlotsRef.current.length;
       const nextIndex = clampHotbarIndex(state.selectedIndex, slotCount);
@@ -2434,6 +2465,29 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
 
     function onKeyDown(event: KeyboardEvent): void {
       const key = event.key.toLowerCase();
+      if (key === "escape") {
+        const next = !menuOpenRef.current;
+        menuOpenRef.current = next;
+        setMenuOpen(next);
+        if (next) {
+          keyState.clear();
+          jumpQueued = false;
+        }
+        event.preventDefault();
+        return;
+      }
+      if (event.code === "Backquote" || key === "`") {
+        setCameraMode((previous) => (previous === "first-person" ? "third-person" : "first-person"));
+        updateCombatStatus({
+          lastAction: "camera_toggle",
+          status: "Camera toggled (`)",
+        });
+        event.preventDefault();
+        return;
+      }
+      if (menuOpenRef.current) {
+        return;
+      }
       if (key === "f3") {
         const next = !showDiagnosticsRef.current;
         setShowDiagnostics(next);
@@ -2687,10 +2741,14 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
       const nextAspect = mount.clientWidth / mount.clientHeight;
       camera.aspect = nextAspect;
       camera.updateProjectionMatrix();
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5) * RENDER_SCALE);
       renderer.setSize(mount.clientWidth, mount.clientHeight);
     }
 
     function onPointerDown(event: PointerEvent): void {
+      if (menuOpenRef.current) {
+        return;
+      }
       if (event.button !== 0 && event.button !== 2) {
         return;
       }
@@ -2715,6 +2773,9 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
     }
 
     function onPointerMove(event: PointerEvent): void {
+      if (menuOpenRef.current) {
+        return;
+      }
       if (!draggingCamera || activePointerId !== event.pointerId) {
         if (activePointerId === event.pointerId && !pointerMoved) {
           if (Math.abs(event.clientX - pointerDownX) + Math.abs(event.clientY - pointerDownY) > 6) {
@@ -2736,6 +2797,9 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
     }
 
     function onPointerUp(event: PointerEvent): void {
+      if (menuOpenRef.current) {
+        return;
+      }
       if (activePointerId !== event.pointerId) {
         return;
       }
@@ -2786,6 +2850,11 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
 
       const deltaSeconds = Math.min((timestamp - previousTime) / 1000, 0.1);
       previousTime = timestamp;
+
+      if (menuOpenRef.current) {
+        keyState.clear();
+        jumpQueued = false;
+      }
 
       if (keyState.has("q") || keyState.has("arrowleft")) {
         yaw += turnSpeed * deltaSeconds;
@@ -2936,6 +3005,13 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
       const smoothing = activeCameraMode === "first-person" ? 0.28 : 0.12;
       camera.position.lerp(desiredCameraPosition, smoothing);
       camera.lookAt(cameraLookTarget);
+      skyDome.position.copy(camera.position);
+      torchLight.position.set(
+        playerPosition.x + (forwardVector.x * VOXEL_BLOCK_SIZE * 0.45),
+        playerPosition.y + (PLAYER_HEIGHT * 0.75),
+        playerPosition.z + (forwardVector.z * VOXEL_BLOCK_SIZE * 0.45),
+      );
+      torchLight.intensity = 0.8 + (Math.sin(timestamp * 0.0065) * 0.08);
 
       if (defeatedTargetsRef.current.size > 0) {
         for (const [targetId, respawnTick] of defeatedTargetsRef.current) {
@@ -2960,6 +3036,13 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
           0,
           Math.ceil((actionCooldownUntil.get(selectedSlot.id) ?? 0) - performance.now()),
         );
+        const terrainSample = sampleTerrainAtWorld(
+          playerPosition.x,
+          playerPosition.z,
+          worldSeed,
+          VOXEL_MAX_HEIGHT,
+          VOXEL_BLOCK_SIZE,
+        );
         setHud({
           x: playerPosition.x,
           z: playerPosition.z,
@@ -2969,6 +3052,10 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
           chunkZ: activeChunkZ,
           chunkCount: chunkStore.size,
         });
+        setMinimapHud((previous) => ({
+          ...previous,
+          biome: resolveBiomeLabel(terrainSample, terrainSample.height, VOXEL_MAX_HEIGHT),
+        }));
         setCombatHud((previous) => ({
           ...previous,
           selectedSlotId: selectedSlot.id,
@@ -3076,50 +3163,48 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
         {mmCoreReady && !mmCoreError ? (
           <div className={`gameplay-overlay mode-${cameraMode}`}>
             <div className="crosshair" aria-hidden />
-            <div className="hud-top-row">
-              <p className="hud-mode-chip">{cameraMode === "first-person" ? "First Person" : "Third Person"}</p>
-              <p className="hud-status-chip">{combatHud.status}</p>
+            <div className="valheim-hotbar" aria-label="hotbar">
+              {hotbarUiSlots.map((slot, index) =>
+                slot ? (
+                  <button
+                    key={slot.id}
+                    type="button"
+                    className={`valheim-slot ${selectedHotbarIndex === index ? "active" : ""}`}
+                    onClick={() => handleHotbarSelect(index)}
+                    aria-label={`${slot.label} (${slot.keybind})`}
+                  >
+                    <span className="slot-key">{slot.keybind}</span>
+                    <span className="slot-icon">{resolveHotbarIconLabel(slot.id)}</span>
+                    {hotbarUiCounts[index] > 0 ? (
+                      <span className="slot-count">{hotbarUiCounts[index]}</span>
+                    ) : null}
+                  </button>
+                ) : (
+                  <div key={`empty-slot-${index}`} className="valheim-slot empty" aria-hidden />
+                ),
+              )}
+            </div>
+            <div className="valheim-minimap" aria-label="minimap">
+              <div className="minimap-header">
+                <span className="minimap-region">{minimapHud.region}</span>
+                <span className="minimap-biome">{minimapHud.biome}</span>
+              </div>
+              <div className="minimap-frame">
+                <div className="minimap-dot" />
+                {showMinimapDebug ? (
+                  <div className="minimap-debug">
+                    <span>
+                      {hud.chunkX},{hud.chunkZ}
+                    </span>
+                    <span>{runtimeHud.tick}</span>
+                  </div>
+                ) : null}
+              </div>
             </div>
             {storyBeatBanner && performance.now() < storyBeatBanner.expiresAt ? (
               <div className="story-beat-banner" role="status" aria-live="polite">
                 <span className="story-beat-label">Story Beat</span>
                 <span className="story-beat-text">{storyBeatBanner.beat}</span>
-              </div>
-            ) : null}
-            {showMinimapDebug ? (
-              <div className="debug-minimap" aria-label="chunk minimap">
-                <div className="debug-minimap-head">
-                  <span>
-                    Chunk {hud.chunkX},{hud.chunkZ}
-                  </span>
-                  <span>Tick {runtimeHud.tick}</span>
-                </div>
-                <div className="debug-minimap-grid">
-                  <div className="debug-minimap-player" style={{ left: "50%", top: "50%" }} />
-                  {directiveHud.spawnHints
-                    .map((hint) => {
-                      const deltaChunkX = hint.chunkX - hud.chunkX;
-                      const deltaChunkZ = hint.chunkZ - hud.chunkZ;
-                      if (Math.abs(deltaChunkX) > 3 || Math.abs(deltaChunkZ) > 3) {
-                        return null;
-                      }
-                      const left = 50 + (deltaChunkX * 14);
-                      const top = 50 + (deltaChunkZ * 14);
-                      return (
-                        <div
-                          key={hint.hintId}
-                          className="debug-minimap-hint"
-                          style={{ left: `${left}%`, top: `${top}%` }}
-                          title={`${hint.label} @ ${hint.chunkX},${hint.chunkZ}`}
-                        />
-                      );
-                    })
-                    .filter((node) => node !== null)}
-                </div>
-                <div className="debug-minimap-foot">
-                  <span>Loaded {hud.chunkCount}</span>
-                  <span>{runtimeHud.mode}</span>
-                </div>
               </div>
             ) : null}
             {activeHudToasts.length > 0 ? (
@@ -3132,222 +3217,205 @@ export function WorldCanvas({ profile }: WorldCanvasProps) {
               </div>
             ) : null}
             {cameraMode === "first-person" ? <div className="first-person-weapon" aria-hidden /> : null}
-            <div className="hud-bottom-dock">
-              <div className="hearts-row" aria-label="health">
-                {Array.from({ length: resolvedMaxHearts }, (_, index) => (
-                  <span
-                    key={`heart-${index}`}
-                    className={`heart-icon ${index < resolvedCurrentHearts ? "full" : "empty"}`}
-                    aria-hidden
+            <div className="valheim-status" aria-label="status">
+              <div className="status-health">
+                <div className="status-health-bar">
+                  <div
+                    className="status-health-fill"
+                    style={{
+                      height: `${Math.round((healthHud.current / Math.max(1, healthHud.max)) * 100)}%`,
+                    }}
                   />
-                ))}
+                </div>
+                <div className="status-health-text">
+                  {Math.round(healthHud.current)}/{Math.round(healthHud.max)}
+                </div>
               </div>
-              <div className="hotbar-strip">
-                {hotbarUiSlots.map((slot, index) =>
-                  slot ? (
-                    <button
-                      key={slot.id}
-                      type="button"
-                      className={`hud-hotbar-slot ${selectedHotbarIndex === index ? "active" : ""}`}
-                      onClick={() => handleHotbarSelect(index)}
-                      aria-label={`${slot.label} (${slot.keybind})`}
-                    >
-                      <span className="slot-key">{slot.keybind}</span>
-                      <span className="slot-label">{slot.label}</span>
-                      {selectedHotbarIndex === index && combatHud.selectedCooldownMs > 0 ? (
-                        <span className="slot-cooldown">{combatHud.selectedCooldownMs}ms</span>
-                      ) : null}
-                    </button>
-                  ) : (
-                    <div key={`empty-slot-${index}`} className="hud-hotbar-slot empty" aria-hidden />
-                  ),
-                )}
-              </div>
-              <div className="craft-strip" aria-label="craft recipes">
-                {DEFAULT_RUNTIME_CRAFT_RECIPES.map((recipe, index) => (
-                  <button
-                    key={recipe.id}
-                    type="button"
-                    className={`hud-craft-slot ${selectedCraftRecipeIndex === index ? "active" : ""}`}
-                    onClick={() => handleCraftRecipeSelect(index)}
-                    aria-label={`${recipe.label} (${recipe.keybind})`}
-                  >
-                    <span className="slot-key">{recipe.keybind}</span>
-                    <span className="slot-label">{recipe.label}</span>
-                  </button>
+              <div className="status-food-row">
+                {STATUS_RESOURCE_IDS.map((resourceId) => (
+                  <div key={resourceId} className="status-food">
+                    <span className={`status-food-icon status-${resourceId}`} aria-hidden />
+                    <span className="status-food-count">{inventoryHud.resources[resourceId] ?? 0}</span>
+                  </div>
                 ))}
               </div>
             </div>
           </div>
         ) : null}
       </div>
-      <aside className="world-hud dex-shell">
-        <h2>Trainer: {playerLabel}</h2>
-        <div className="camera-row">
-          <button
-            type="button"
-            className={`button button-secondary ${cameraMode === "first-person" ? "button-active" : ""}`}
-            onClick={() => setCameraMode("first-person")}
-          >
-            First Person
-          </button>
-          <button
-            type="button"
-            className={`button button-secondary ${cameraMode === "third-person" ? "button-active" : ""}`}
-            onClick={() => setCameraMode("third-person")}
-          >
-            Third Person
-          </button>
+      {menuOpen ? (
+        <div className="hud-menu" role="dialog" aria-modal="true">
+          <div className="hud-menu-panel dex-shell">
+            <div className="hud-menu-header">
+              <div>
+                <p className="eyebrow">Field Session</p>
+                <h2>{playerLabel}</h2>
+                <p className="muted">
+                  {profile.characterClass} · {profile.gender} · {profile.origin}
+                </p>
+                <p className="muted">World: {profile.world.seed}</p>
+              </div>
+              <button type="button" className="button button-secondary" onClick={() => setMenuOpen(false)}>
+                Resume (Esc)
+              </button>
+            </div>
+            <div className="hud-menu-grid">
+              <section className="hud-menu-section">
+                <h3>Controls</h3>
+                <ul className="hud-menu-list">
+                  <li>
+                    <span className="code">`</span> Toggle camera
+                  </li>
+                  <li>
+                    <span className="code">WASD</span> Move · <span className="code">Shift</span> Run ·{" "}
+                    <span className="code">Space</span> Jump
+                  </li>
+                  <li>
+                    <span className="code">1-5</span> Hotbar · <span className="code">6-9</span> Recipes ·{" "}
+                    <span className="code">R</span> Craft
+                  </li>
+                  <li>
+                    <span className="code">F</span> Interact · Click to attack/cast
+                  </li>
+                </ul>
+              </section>
+              <section className="hud-menu-section">
+                <h3>Crafting</h3>
+                <div className="craft-strip menu-craft-strip" aria-label="craft recipes">
+                  {DEFAULT_RUNTIME_CRAFT_RECIPES.map((recipe, index) => (
+                    <button
+                      key={recipe.id}
+                      type="button"
+                      className={`hud-craft-slot ${selectedCraftRecipeIndex === index ? "active" : ""}`}
+                      onClick={() => handleCraftRecipeSelect(index)}
+                      aria-label={`${recipe.label} (${recipe.keybind})`}
+                    >
+                      <span className="slot-key">{recipe.keybind}</span>
+                      <span className="slot-label">{recipe.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </section>
+              <section className="hud-menu-section">
+                <h3>Stash</h3>
+                <div className="stash-resource-strip" aria-label="stash resource selector">
+                  {DEFAULT_RUNTIME_RESOURCE_IDS.map((resourceId, index) => (
+                    <button
+                      key={resourceId}
+                      type="button"
+                      className={`stash-resource-button ${selectedStashResourceId === resourceId ? "active" : ""}`}
+                      onClick={() => handleStashResourceSelect(index)}
+                    >
+                      {formatRuntimeResourceLabel(resourceId)}
+                    </button>
+                  ))}
+                </div>
+                <div className="stash-transfer-strip" aria-label="stash transfer amount selector">
+                  {DEFAULT_STASH_TRANSFER_AMOUNTS.map((amount, index) => (
+                    <button
+                      key={`transfer-amount-${amount}`}
+                      type="button"
+                      className={`stash-resource-button ${selectedTransferAmount === amount ? "active" : ""}`}
+                      onClick={() => handleTransferAmountSelect(index)}
+                    >
+                      x{amount}
+                    </button>
+                  ))}
+                </div>
+                <p className="muted">
+                  Transfer modifiers: <span className="code">Shift</span> half,{" "}
+                  <span className="code">Ctrl/Alt/Cmd</span> all.
+                </p>
+              </section>
+              <section className="hud-menu-section">
+                <h3>Diagnostics</h3>
+                <div className="diag-row">
+                  <button
+                    type="button"
+                    className={`button button-secondary ${showDiagnostics ? "button-active" : ""}`}
+                    onClick={() => setShowDiagnostics((previous) => !previous)}
+                  >
+                    Diagnostics {showDiagnostics ? "On" : "Off"}
+                  </button>
+                  <button
+                    type="button"
+                    className="button button-secondary"
+                    onClick={() => setMeshDetailMode((previous) => (previous === "detailed" ? "basic" : "detailed"))}
+                  >
+                    Mesh {meshDetailMode}
+                  </button>
+                  <button
+                    type="button"
+                    className={`button button-secondary ${showMinimapDebug ? "button-active" : ""}`}
+                    onClick={() => setShowMinimapDebug((previous) => !previous)}
+                  >
+                    Minimap Debug {showMinimapDebug ? "On" : "Off"}
+                  </button>
+                </div>
+                <ul className="hud-menu-list">
+                  <li>
+                    X: {hud.x.toFixed(1)} · Z: {hud.z.toFixed(1)} · Chunk {hud.chunkX},{hud.chunkZ}
+                  </li>
+                  <li>Runtime Tick: {runtimeHud.tick}</li>
+                  <li>
+                    Active Recipe: {selectedCraftRecipe.label} ({selectedCraftRecipe.keybind})
+                  </li>
+                  <li>World Flags: {formatWorldFlags(worldFlagHud.flags)}</li>
+                  <li>Story Beat: {directiveHud.storyBeats.at(-1) ?? "none"}</li>
+                  <li>Spawn Hints: {formatSpawnHints(directiveHud.spawnHints)}</li>
+                  <li>Inventory: {formatResourceSummary(inventoryHud.resources)}</li>
+                  <li>Stash: {formatResourceSummary(containerHud.resources)}</li>
+                  <li>Private Stash: {formatResourceSummary(privateContainerHud.resources)}</li>
+                  <li>Mesh Core: {mmCoreReady ? "wasm" : mmCoreError ? "error" : "loading"}</li>
+                  <li>Mesh Quads: {meshHud.quads}</li>
+                  <li>Mesh Verts: {meshHud.vertices}</li>
+                  <li>Orchestrator Events: {orchestratorHud.eventsSent}</li>
+                  <li>Directives Received: {orchestratorHud.directivesReceived}</li>
+                </ul>
+                {meshHud.workerError ? <p className="muted">Mesh Error: {meshHud.workerError}</p> : null}
+                {orchestratorHud.lastError ? <p className="muted">Orchestrator Error: {orchestratorHud.lastError}</p> : null}
+              </section>
+              <section className="hud-menu-section">
+                <h3>Session Log</h3>
+                <ul className="hud-menu-list">
+                  {directiveHistory.length === 0 ? (
+                    <li>No directives received yet.</li>
+                  ) : (
+                    directiveHistory
+                      .slice()
+                      .reverse()
+                      .slice(0, 6)
+                      .map((entry) => (
+                        <li key={entry.id}>
+                          [{entry.tick}] {entry.text}
+                        </li>
+                      ))
+                  )}
+                </ul>
+              </section>
+            </div>
+            <div className="hud-menu-actions">
+              <button
+                type="button"
+                className="button button-secondary"
+                onClick={() => {
+                  clearPlayerProfile();
+                  window.location.assign("/");
+                }}
+              >
+                Reset Save
+              </button>
+              <button
+                type="button"
+                className="button button-secondary"
+                onClick={() => window.location.assign("/")}
+              >
+                Home
+              </button>
+            </div>
+          </div>
         </div>
-        <div className="diag-row">
-          <button
-            type="button"
-            className={`button button-secondary ${showDiagnostics ? "button-active" : ""}`}
-            onClick={() => setShowDiagnostics((previous) => !previous)}
-          >
-            Diagnostics {showDiagnostics ? "On" : "Off"}
-          </button>
-          <button
-            type="button"
-            className="button button-secondary"
-            onClick={() => setMeshDetailMode((previous) => (previous === "detailed" ? "basic" : "detailed"))}
-          >
-            Mesh {meshDetailMode}
-          </button>
-        </div>
-        <div className="stash-resource-strip" aria-label="stash resource selector">
-          {DEFAULT_RUNTIME_RESOURCE_IDS.map((resourceId, index) => (
-            <button
-              key={resourceId}
-              type="button"
-              className={`stash-resource-button ${selectedStashResourceId === resourceId ? "active" : ""}`}
-              onClick={() => handleStashResourceSelect(index)}
-            >
-              {formatRuntimeResourceLabel(resourceId)}
-            </button>
-          ))}
-        </div>
-        <div className="stash-transfer-strip" aria-label="stash transfer amount selector">
-          {DEFAULT_STASH_TRANSFER_AMOUNTS.map((amount, index) => (
-            <button
-              key={`transfer-amount-${amount}`}
-              type="button"
-              className={`stash-resource-button ${selectedTransferAmount === amount ? "active" : ""}`}
-              onClick={() => handleTransferAmountSelect(index)}
-            >
-              x{amount}
-            </button>
-          ))}
-        </div>
-        <ul>
-          <li>X: {hud.x.toFixed(1)}</li>
-          <li>Z: {hud.z.toFixed(1)}</li>
-          <li>Lat: {hud.lat.toFixed(5)}</li>
-          <li>Lon: {hud.lon.toFixed(5)}</li>
-          <li>
-            Chunk: {hud.chunkX}, {hud.chunkZ}
-          </li>
-          <li>Loaded Chunks: {hud.chunkCount}</li>
-          <li>Camera: {cameraMode}</li>
-          <li>Runtime Mode: {runtimeHud.mode}</li>
-          <li>Runtime Tick: {runtimeHud.tick}</li>
-          <li>World Flags Tick: {worldFlagHud.tick}</li>
-          <li>World Flags: {formatWorldFlags(worldFlagHud.flags)}</li>
-          <li>Directive Tick: {directiveHud.tick}</li>
-          <li>
-            Story Beat:{" "}
-            {directiveHud.storyBeats.length > 0
-              ? directiveHud.storyBeats[directiveHud.storyBeats.length - 1]
-              : "none"}
-          </li>
-          <li>Spawn Hints: {formatSpawnHints(directiveHud.spawnHints)}</li>
-          <li>Diagnostics: {showDiagnostics ? `on (${meshDetailMode})` : "off"}</li>
-          <li>Stash Resource: {formatRuntimeResourceLabel(selectedStashResourceId)}</li>
-          <li>Transfer Amount: x{selectedTransferAmount}</li>
-          <li>Transfer Modifiers: Shift=half, Ctrl/Alt/Cmd=all</li>
-          <li>Inventory: {formatResourceSummary(inventoryHud.resources)}</li>
-          <li>Inventory Tick: {inventoryHud.tick}</li>
-          <li>Stash ({containerHud.containerId}): {formatResourceSummary(containerHud.resources)}</li>
-          <li>Stash Tick: {containerHud.tick}</li>
-          <li>Private Stash ({privateContainerHud.containerId || "loading"}): {formatResourceSummary(privateContainerHud.resources)}</li>
-          <li>Private Stash Tick: {privateContainerHud.tick}</li>
-          {showDiagnostics ? <li>Mesh Core: {meshHud.coreMode}</li> : null}
-          {showDiagnostics ? <li>Mesh Quads: {meshHud.quads}</li> : null}
-          {showDiagnostics ? <li>Mesh Verts: {meshHud.vertices}</li> : null}
-          {showDiagnostics ? <li>Orchestrator Events: {orchestratorHud.eventsSent}</li> : null}
-          {showDiagnostics ? <li>Directives Received: {orchestratorHud.directivesReceived}</li> : null}
-          {showDiagnostics ? <li>Last Event: {orchestratorHud.lastEventType}</li> : null}
-          {showDiagnostics ? (
-            <li>
-              Asset Placeholders: {assetHud.placeholderVisibleCount}/{assetHud.placeholderSlotCount} (
-              {(assetHud.placeholderRatio * 100).toFixed(1)}%)
-            </li>
-          ) : null}
-          {showDiagnostics ? <li>Asset Patch OK: {assetHud.patchApplySuccessCount}</li> : null}
-          {showDiagnostics ? <li>Asset Patch Fail: {assetHud.patchApplyFailureCount}</li> : null}
-          {showDiagnostics ? (
-            <li>
-              Patch Latency ms: {assetHud.patchLatencyLastMs.toFixed(1)} (avg{" "}
-              {assetHud.patchLatencyAvgMs.toFixed(1)}, p95 {assetHud.patchLatencyP95Ms.toFixed(1)})
-            </li>
-          ) : null}
-          {showDiagnostics && meshDetailMode === "detailed" ? <li>Mesh Extract ms: {meshHud.extractMs.toFixed(2)}</li> : null}
-          {showDiagnostics && meshDetailMode === "detailed" ? <li>Mesh Upload ms: {meshHud.uploadMs.toFixed(2)}</li> : null}
-          {showDiagnostics && meshDetailMode === "detailed" ? <li>Mesh Extract Avg: {meshHud.extractAvgMs.toFixed(2)}</li> : null}
-          {showDiagnostics && meshDetailMode === "detailed" ? <li>Mesh Upload Avg: {meshHud.uploadAvgMs.toFixed(2)}</li> : null}
-          {showDiagnostics && meshDetailMode === "detailed" ? <li>Mesh Extract P95: {meshHud.extractP95Ms.toFixed(2)}</li> : null}
-          {showDiagnostics && meshDetailMode === "detailed" ? <li>Mesh Upload P95: {meshHud.uploadP95Ms.toFixed(2)}</li> : null}
-          {showDiagnostics && meshDetailMode === "detailed" ? (
-            <li>Active Chunk Extract Avg: {meshHud.activeChunkExtractAvgMs.toFixed(2)}</li>
-          ) : null}
-          {showDiagnostics && meshDetailMode === "detailed" ? (
-            <li>Active Chunk Upload Avg: {meshHud.activeChunkUploadAvgMs.toFixed(2)}</li>
-          ) : null}
-          {showDiagnostics && meshDetailMode === "detailed" ? <li>Mesh Tracked Chunks: {meshHud.trackedChunks}</li> : null}
-          {showDiagnostics && meshHud.workerError ? <li>Mesh Worker Error: {meshHud.workerError}</li> : null}
-          <li>Grid: {CHUNK_GRID_CELLS}x{CHUNK_GRID_CELLS} cells/chunk</li>
-          {atlasSummary ? (
-            <li>
-              Atlas: {atlasSummary.atlasId} ({atlasSummary.monCount} mons)
-            </li>
-          ) : (
-            <li>Atlas: not loaded</li>
-          )}
-          {orchestratorHud.lastError ? <li>Orchestrator Error: {orchestratorHud.lastError}</li> : null}
-        </ul>
-        <ul className="combat-log">
-          <li>Active Slot: {combatHud.selectedSlotLabel}</li>
-          <li>
-            Active Recipe: {selectedCraftRecipe.label} ({selectedCraftRecipe.keybind})
-          </li>
-          <li>Cooldown: {combatHud.selectedCooldownMs > 0 ? `${combatHud.selectedCooldownMs}ms` : "ready"}</li>
-          <li>Last Action: {combatHud.lastAction}</li>
-          <li>Last Target: {combatHud.lastTarget}</li>
-          <li>Target Resolution: {combatHud.targetResolution}</li>
-        </ul>
-        <ul className="directive-history">
-          {directiveHistory.length === 0 ? (
-            <li>Directive History: none</li>
-          ) : (
-            directiveHistory
-              .slice()
-              .reverse()
-              .map((entry) => (
-                <li key={entry.id}>
-                  [{entry.tick}] {entry.text}
-                </li>
-              ))
-          )}
-        </ul>
-        <p className="muted">
-          Drag to rotate camera. Move with W/S and swapped strafe (A=right, D=left). Use 1-5 to select slot and
-          left-click to attack or break blocks. Right-click places a block. Press F to interact and Space to jump.
-          Craft flow: choose recipe with 6-9 (or click recipe bar), then press R to craft. Select stash resource with
-          N/M and amount with J/K (or use HUD buttons). Hold Shift for half transfer, or Ctrl/Alt/Cmd for all. Press
-          [ / ] for shared stash and ; / &apos; for private stash transfers. Use F3 to toggle diagnostics, F4 to switch
-          mesh detail mode, and F5 to toggle debug minimap.
-        </p>
-      </aside>
+      ) : null}
     </section>
   );
 }
@@ -3516,6 +3584,52 @@ function formatContainerRejectReason(reason: string | undefined): string {
   }
 }
 
+function formatRegionLabel(origin: string): string {
+  if (!origin) {
+    return "Frontier";
+  }
+  return origin
+    .split(/[_-]/g)
+    .map((chunk) => chunk.charAt(0).toUpperCase() + chunk.slice(1))
+    .join(" ");
+}
+
+function resolveHotbarIconLabel(slotId: string): string {
+  switch (slotId) {
+    case "slot-1-rust-blade":
+      return "SW";
+    case "slot-2-ember-bolt":
+      return "EM";
+    case "slot-3-frost-bind":
+      return "FR";
+    case "slot-4-bandage":
+      return "BD";
+    case "slot-5-bomb":
+      return "BM";
+    default:
+      return "IT";
+  }
+}
+
+function resolveBiomeLabel(sample: TerrainSample, heightBlocks: number, maxHeight: number): string {
+  const normalizedHeight = THREE.MathUtils.clamp(heightBlocks / Math.max(1, maxHeight), 0, 1);
+  const moisture = THREE.MathUtils.clamp(sample.moisture, 0, 1);
+
+  if (sample.pathMask > 0.6 || sample.path) {
+    return "Meadows";
+  }
+  if (moisture > 0.82) {
+    return "Marsh";
+  }
+  if (normalizedHeight > 0.78 || sample.ridge > 0.7) {
+    return "Highlands";
+  }
+  if (normalizedHeight < 0.28) {
+    return "Lowlands";
+  }
+  return "Meadows";
+}
+
 function resolveTerrainSurfaceColor(
   sample: TerrainSample,
   heightBlocks: number,
@@ -3527,31 +3641,31 @@ function resolveTerrainSurfaceColor(
   const moisture = THREE.MathUtils.clamp(sample.moisture, 0, 1);
 
   if (sample.path || sample.pathMask > 0.6) {
-    const pathColor = new THREE.Color("#b08b5a");
-    const edgeTint = new THREE.Color("#c2a173");
-    return pathColor.lerp(edgeTint, sample.pathMask * 0.45);
+    const pathColor = new THREE.Color("#c7b49a");
+    const edgeTint = new THREE.Color("#a38a68");
+    return pathColor.lerp(edgeTint, sample.pathMask * 0.55);
   }
 
   if (moisture > 0.82 && heightBlocks < maxHeight * 0.6) {
-    const waterBase = new THREE.Color("#4c6e98");
-    return waterBase.lerp(new THREE.Color("#2f567f"), (moisture - 0.82) * 2.4);
+    const waterBase = new THREE.Color("#2f4d74");
+    return waterBase.lerp(new THREE.Color("#1f3959"), (moisture - 0.82) * 2.2);
   }
 
-  const hue = 0.3 - (normalizedHeight * 0.05) + ((moisture - 0.5) * 0.025);
-  const saturation = 0.4 + (moisture * 0.22);
-  const lightness = 0.22 + (normalizedHeight * 0.24) + (moisture * 0.06);
+  const hue = 0.29 - (normalizedHeight * 0.06) + ((moisture - 0.5) * 0.03);
+  const saturation = 0.46 + (moisture * 0.26);
+  const lightness = 0.2 + (normalizedHeight * 0.3) + (moisture * 0.08);
   const color = new THREE.Color();
   color.setHSL(hue, saturation, lightness);
 
   const detail = (Math.sin(worldX * 0.23 + worldZ * 0.19) * Math.cos(worldZ * 0.27)) * 0.5 + 0.5;
-  const detailShift = (detail - 0.5) * 0.08;
+  const detailShift = (detail - 0.5) * 0.09;
   color.offsetHSL(0, 0, detailShift);
 
   if (sample.ridge > 0.62) {
-    const ridgeBlend = Math.min(1, (sample.ridge - 0.62) / 0.38) * 0.55;
-    color.lerp(new THREE.Color("#6e6a5f"), ridgeBlend);
+    const ridgeBlend = Math.min(1, (sample.ridge - 0.62) / 0.38) * 0.6;
+    color.lerp(new THREE.Color("#6a645b"), ridgeBlend);
   } else if (normalizedHeight > 0.78) {
-    color.lerp(new THREE.Color("#6b705f"), (normalizedHeight - 0.78) * 0.7);
+    color.lerp(new THREE.Color("#6b6f60"), (normalizedHeight - 0.78) * 0.75);
   }
 
   return color;
@@ -3564,17 +3678,17 @@ function buildChunkVertexColors(positions: Float32Array, chunkMaxHeight: number)
     const y = positions[index + 1];
     const normalized = THREE.MathUtils.clamp(y / maxHeight, 0, 1);
 
-    let r = 0.26 + (0.2 * normalized);
-    let g = 0.42 + (0.32 * normalized);
-    let b = 0.2 + (0.08 * (1 - normalized));
+    let r = 0.24 + (0.2 * normalized);
+    let g = 0.38 + (0.34 * normalized);
+    let b = 0.19 + (0.08 * (1 - normalized));
 
     if (normalized < 0.22) {
-      r = 0.46;
-      g = 0.34;
+      r = 0.44;
+      g = 0.33;
       b = 0.22;
     } else if (normalized > 0.78) {
-      r += 0.07;
-      g += 0.07;
+      r += 0.08;
+      g += 0.08;
       b += 0.05;
     }
 
@@ -3594,18 +3708,56 @@ function createEventId(): string {
   return `event-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 }
 
+function createSkyDome(): THREE.Mesh {
+  const geometry = new THREE.SphereGeometry(600, 32, 16);
+  const material = new THREE.ShaderMaterial({
+    uniforms: {
+      topColor: { value: new THREE.Color(SKY_TOP_COLOR) },
+      bottomColor: { value: new THREE.Color(SKY_HORIZON_COLOR) },
+      offset: { value: 36.0 },
+      exponent: { value: 0.55 },
+    },
+    vertexShader: `
+      varying vec3 vWorldPosition;
+      void main() {
+        vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+        vWorldPosition = worldPosition.xyz;
+        gl_Position = projectionMatrix * viewMatrix * worldPosition;
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 topColor;
+      uniform vec3 bottomColor;
+      uniform float offset;
+      uniform float exponent;
+      varying vec3 vWorldPosition;
+      void main() {
+        float h = normalize(vWorldPosition + vec3(0.0, offset, 0.0)).y;
+        float mixValue = pow(max(h, 0.0), exponent);
+        gl_FragColor = vec4(mix(bottomColor, topColor, mixValue), 1.0);
+      }
+    `,
+    side: THREE.BackSide,
+    depthWrite: false,
+  });
+  const sky = new THREE.Mesh(geometry, material);
+  sky.frustumCulled = false;
+  sky.renderOrder = -10;
+  return sky;
+}
+
 function createSpriteTextureSet(): SpriteTextureSet {
   return {
-    playerA: createPixelTexture((ctx) => drawTrainerSprite(ctx, "#d63232", "#1844ba", "#2a2a2a", 0)),
-    playerB: createPixelTexture((ctx) => drawTrainerSprite(ctx, "#d63232", "#1844ba", "#2a2a2a", 1)),
-    npcA: createPixelTexture((ctx) => drawTrainerSprite(ctx, "#8c6a41", "#316b48", "#2f2f2f", 0)),
-    npcB: createPixelTexture((ctx) => drawTrainerSprite(ctx, "#6c5942", "#3a4f8f", "#2f2f2f", 1)),
-    monA: createPixelTexture((ctx) => drawMonSprite(ctx, "#4e7de7", "#d9ebff", "#2b3366")),
-    monB: createPixelTexture((ctx) => drawMonSprite(ctx, "#f5a75a", "#fff5df", "#7a3c18")),
-    monC: createPixelTexture((ctx) => drawMonSprite(ctx, "#74c46f", "#e7ffdb", "#2f5a2f")),
-    treeA: createPixelTexture((ctx) => drawTreeSprite(ctx, "#3f9448", "#80cf79", "#6d4a2a")),
-    treeB: createPixelTexture((ctx) => drawTreeSprite(ctx, "#2f7f52", "#63b369", "#72522f")),
-    treeC: createPixelTexture((ctx) => drawTreeSprite(ctx, "#4f8d3c", "#97d673", "#805837")),
+    playerA: createPixelTexture((ctx) => drawTrainerSprite(ctx, "#c9473b", "#284b7a", "#2b2b2b", 0)),
+    playerB: createPixelTexture((ctx) => drawTrainerSprite(ctx, "#c9473b", "#284b7a", "#2b2b2b", 1)),
+    npcA: createPixelTexture((ctx) => drawTrainerSprite(ctx, "#8a6a43", "#2f5a3f", "#2b2b2b", 0)),
+    npcB: createPixelTexture((ctx) => drawTrainerSprite(ctx, "#6a5846", "#34507e", "#2b2b2b", 1)),
+    monA: createPixelTexture((ctx) => drawMonSprite(ctx, "#4f78d2", "#d9ebff", "#2b3366")),
+    monB: createPixelTexture((ctx) => drawMonSprite(ctx, "#e39652", "#fff2d8", "#7a3c18")),
+    monC: createPixelTexture((ctx) => drawMonSprite(ctx, "#66b067", "#e7ffd3", "#2f5a2f")),
+    treeA: createPixelTexture((ctx) => drawTreeSprite(ctx, "#2f6f3b", "#79b86a", "#5a3b21")),
+    treeB: createPixelTexture((ctx) => drawTreeSprite(ctx, "#2d6a45", "#6fb16a", "#5c3d23")),
+    treeC: createPixelTexture((ctx) => drawTreeSprite(ctx, "#3a6a33", "#86c36d", "#624126")),
   };
 }
 

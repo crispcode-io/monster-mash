@@ -3,7 +3,6 @@
 import Link from "next/link";
 import { useMemo, useSyncExternalStore } from "react";
 import {
-  clearPlayerProfile,
   getProfileSnapshot,
   parsePlayerProfile,
   subscribeProfileStore,
@@ -39,31 +38,6 @@ export function WorldScreen() {
 
   return (
     <main className="world-screen">
-      <header className="world-header dex-shell">
-        <div>
-          <p className="eyebrow">Field Session</p>
-          <h1>{profile.name}</h1>
-          <p className="muted">
-            {profile.characterClass} · {profile.gender} · {profile.origin}
-          </p>
-          <p className="muted">World: {profile.world.seed}</p>
-        </div>
-        <div className="action-row">
-          <button
-            className="button button-secondary"
-            onClick={() => {
-              clearPlayerProfile();
-              window.location.assign("/");
-            }}
-          >
-            Reset Save
-          </button>
-          <Link className="button button-secondary" href="/">
-            Home
-          </Link>
-        </div>
-      </header>
-
       <WorldCanvas profile={profile} />
     </main>
   );

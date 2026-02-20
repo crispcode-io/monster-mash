@@ -2620,3 +2620,42 @@ Purpose: maintain reversible checkpoints so we can backtrack implementation safe
 
 ### Notes
 1. Bot simulation uses deterministic block coordinates to guarantee craftable resources.
+
+---
+
+## Checkpoint CP-0083 (2026-02-20)
+
+### Completed
+1. Added painterly dusk sky dome, warmer lighting, and torch glow for a pixelated fantasy atmosphere.
+2. Tuned terrain palette toward lush greens, stone paths, and cooler water tones.
+3. Adjusted render scale and canvas image rendering for a crisper, pixelated feel.
+
+### Files touched
+1. `apps/web/src/components/WorldCanvas.tsx`
+2. `docs/progress-log.md`
+
+### Validation
+1. `pnpm --filter web lint` passed
+2. `pnpm --filter web typecheck` passed
+3. `pnpm --filter web test` passed
+4. `pnpm --filter web build` passed
+
+---
+
+## Checkpoint CP-0084 (2026-02-20)
+
+### Completed
+1. Replaced the busy HUD with a Valheim-like minimal overlay: top-left hotbar, top-right minimap, bottom-left status.
+2. Moved all diagnostic and management info into an `Esc` menu.
+3. Added backtick (`) camera toggle and menu action buttons for reset/home.
+
+### Files touched
+1. `apps/web/src/components/WorldCanvas.tsx`
+2. `apps/web/src/components/WorldScreen.tsx`
+3. `apps/web/src/app/globals.css`
+4. `docs/progress-log.md`
+
+### Validation
+1. `pnpm --filter web lint` passed
+2. `pnpm --filter web typecheck` passed
+3. `pnpm --filter web test` passed
